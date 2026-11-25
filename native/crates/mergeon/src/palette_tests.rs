@@ -1081,6 +1081,17 @@ fn documents(harness: &Harness, cx: &mut TestAppContext) -> (String, Vec<(String
     })
 }
 
+/// Ruta canónica del repositorio activo (en Windows difiere de `dir.path()`).
+fn active_repo_path(harness: &Harness, cx: &mut TestAppContext) -> String {
+    harness.model.read_with(cx, |model, _| {
+        model
+            .active_repository()
+            .expect("repositorio activo")
+            .path
+            .clone()
+    })
+}
+
 /// El sidebar no se mueve al pasar de Commits a Local Changes ni al abrir un
 /// documento, y la barra de documentos (32px) solo existe con alguno abierto.
 #[gpui_kit::test]
@@ -1092,7 +1103,7 @@ async fn the_sidebar_stays_put_and_the_document_bar_only_exists_with_documents(
     let harness = Harness::new(cx, true);
     let dir = repository("layout");
     harness.open(&dir, cx).await;
-    let path = dir.path().to_string_lossy().into_owned();
+    let path = active_repo_path(&harness, cx);
 
     let left = |harness: &Harness, cx: &mut TestAppContext| {
         harness.in_window(cx, |window, _| window.find("sidebar").bounds())
@@ -1155,7 +1166,7 @@ async fn double_clicking_the_preview_tab_keeps_it_open(cx: &mut TestAppContext) 
     let harness = Harness::new(cx, true);
     let dir = repository("preview");
     harness.open(&dir, cx).await;
-    let path = dir.path().to_string_lossy().into_owned();
+    let path = active_repo_path(&harness, cx);
     let readme = FileTabDescriptor::working("README.md");
 
     harness.model.update(cx, |model, cx| {
@@ -1178,7 +1189,7 @@ async fn ctrl_w_only_closes_documents(cx: &mut TestAppContext) {
     let harness = Harness::new(cx, true);
     let dir = repository("ctrlw");
     harness.open(&dir, cx).await;
-    let path = dir.path().to_string_lossy().into_owned();
+    let path = active_repo_path(&harness, cx);
     let open = |harness: &Harness, cx: &mut TestAppContext| {
         harness
             .model
@@ -1193,6 +1204,7 @@ async fn ctrl_w_only_closes_documents(cx: &mut TestAppContext) {
         model.activate_workspace_tab(&path, mergeon_model::workspace_tabs::CHANGES_TAB, cx);
         model.open_workspace_file(&path, &FileTabDescriptor::working("README.md"), false, cx);
     });
+    assert_eq!(documents(&harness, cx).1.len(), 1);
     harness.in_window(cx, |window, cx| window.press("secondary-w", cx));
     cx.run_until_parked();
     assert_eq!(open(&harness, cx), 1);
