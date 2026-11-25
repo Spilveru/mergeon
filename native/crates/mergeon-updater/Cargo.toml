@@ -1,0 +1,21 @@
+[package]
+name = "mergeon-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+regex.workspace = true
+# Cliente HTTP síncrono; las features por defecto traen TLS con rustls.
+ureq = "3.4"
+# Verificación del sha512 (en base64) y firma Ed25519 de manifiestos.
+sha2 = "0.10"
+base64 = "0.22"
+ring = "0.17"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,38 @@
+[package]
+name = "mergeon-view-commits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+gpui-kit.workspace = true
+mergeon-ui.workspace = true
+mergeon-view-diff.workspace = true
+# Los diálogos de checkout y "Create Branch" que abre el historial.
+mergeon-view-sidebar.workspace = true
+mergeon-app.workspace = true
+mergeon-model.workspace = true
+mergeon-backend.workspace = true
+mergeon-gitcmd.workspace = true
+mergeon-git-ops.workspace = true
+mergeon-git-query.workspace = true
+mergeon-store.workspace = true
+mergeon-github.workspace = true
+mergeon-updater.workspace = true
+# `Shared` para que varias peticiones de recarga del historial esperen a la
+# misma carga (el `commitLoadPromise` del original).
+futures = "0.3"
+
+[dev-dependencies]
+# `#[gpui_kit::test]` y `gpui_kit::test` (ventanas sin pantalla para los tests
+# de interacción).
+gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+env_logger = "0.11"
+# El `UiHost` de la galería valida los prompts con su patrón.
+regex.workspace = true

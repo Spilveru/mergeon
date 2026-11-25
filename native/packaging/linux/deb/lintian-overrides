@@ -1,0 +1,3 @@
+# El binario enlaza estáticamente la copia de FreeType que compila el crate
+# freetype-sys (lo habitual en Rust): no usa la libfreetype del sistema.
+mergeon: embedded-library *

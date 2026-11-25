@@ -1,0 +1,25 @@
+.TH MERGEON 1 "" "Mergeon" "User Commands"
+.SH NAME
+mergeon \- desktop Git client
+.SH SYNOPSIS
+.B mergeon
+[\fIREPOSITORY\fR]...
+.SH DESCRIPTION
+Mergeon is a graphical Git client. Each
+.I REPOSITORY
+argument is a path to a local Git repository that is opened in its own tab
+when the application starts.
+.SH ENVIRONMENT
+.TP
+.B APP_UPDATE_FEED_URL
+URL of the update feed (a directory that serves the
+.I latest*.yml
+manifests and the installers). Without it the application does not check for
+updates.
+.TP
+.B MERGEON_USER_DATA_DIR
+Directory used for settings instead of the default profile.
+.SH FILES
+.TP
+.I ~/.config/Mergeon/
+Settings, recent repositories and session.

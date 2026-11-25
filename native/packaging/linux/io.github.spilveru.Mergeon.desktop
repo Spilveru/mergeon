@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Mergeon
+GenericName=Git Client
+Comment=Cross-platform desktop Git client
+Exec=mergeon %F
+Icon=io.github.spilveru.Mergeon
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;github;vcs;version control;diff;merge;commit;
+StartupNotify=true
+StartupWMClass=io.github.spilveru.Mergeon

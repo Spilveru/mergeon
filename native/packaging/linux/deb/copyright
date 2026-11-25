@@ -1,0 +1,25 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Mergeon
+Upstream-Contact: Spilveru <spilveru@users.noreply.github.com>
+Source: https://github.com/Spilveru/mergeon
+
+Files: *
+Copyright: 2025-2026 Spilveru
+License: GPL-3.0-or-later
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ On Debian systems, the full text of the GNU General Public License
+ version 3 can be found in `/usr/share/common-licenses/GPL-3'.
+ .
+ The binary statically links third-party Rust crates distributed under their
+ own licenses (including Apache-2.0, MIT, ISC, BSD, and MPL-2.0), embeds the
+ Geist and Geist Mono typefaces (SIL Open Font License 1.1), Lucide icons
+ (ISC License), and Heroicons (MIT License). See THIRD-PARTY-NOTICES.md.

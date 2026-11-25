@@ -1,0 +1,30 @@
+[package]
+name = "mergeon-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+gpui-kit.workspace = true
+mergeon-gitcmd.workspace = true
+mergeon-git-ops.workspace = true
+mergeon-git-query.workspace = true
+mergeon-runtime.workspace = true
+mergeon-store.workspace = true
+mergeon-github.workspace = true
+mergeon-updater.workspace = true
+mergeon-backend.workspace = true
+mergeon-model.workspace = true
+# Canales y futuros compartidos entre el hilo de UI y los de fondo.
+futures = "0.3"
+# Zona horaria local para leer fechas como `Date.parse` (la misma que usa mergeon-model).
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

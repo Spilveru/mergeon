@@ -1,0 +1,219 @@
+name: Quality
+
+# Calidad de Mergeon (Rust + GPUI, en native/).
+#
+# - linux: formato, clippy y tests de todo el workspace, en cada push y PR.
+#   Corre en `ubuntu-latest` por defecto; la variable de repositorio CI_RUNNER
+#   permite elegir otro runner (`self-hosted` o una etiqueta propia).
+#   Los tests de interfaz corren en un display virtual con gestor de ventanas
+#   (native/tools/in-x.sh).
+# - cross: compila el binario en Windows y macOS para detectar roturas de
+#   plataforma, y en Windows corre además toda la suite de tests. Corre en pull
+#   requests y a mano (workflow_dispatch); con CI_CROSS=always corre también en
+#   cada push. El release vuelve a compilar ambas plataformas.
+#
+# A mano (workflow_dispatch) se puede acotar para iterar sobre Windows sin
+# pagar el resto: windows_only salta Linux y macOS, y test_args sustituye a
+# --workspace en los tests de Windows (p. ej. "-p mergeon-app" o
+# "-p mergeon-git-query -- conflict"). Sin inputs (push, PR) todo sigue igual.
+on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Solo Windows (sin Linux ni macOS)
+        type: boolean
+        default: false
+      test_args:
+        description: Argumentos de cargo test en Windows en vez de --workspace (p. ej. "-p mergeon-app")
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+# Por evento: una ejecución a mano no cancela la del push de la misma rama.
+concurrency:
+  group: quality-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Runner de los jobs Linux: ubuntu-latest por defecto (ver cabecera).
+  EPHEMERAL_RUNNER: ${{ vars.CI_RUNNER != 'self-hosted' }}
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, tests)
+    if: ${{ !inputs.windows_only }}
+    # External fork PRs always run on `ubuntu-latest` instead of custom runners.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || (vars.CI_RUNNER == 'github' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest') }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: native
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # El runner propio no trae nada preinstalado: se comprueba antes de
+      # compilar y se dice qué falta y cómo ponerlo. En una máquina de GitHub
+      # (sudo sin clave, efímera) se instala directamente.
+      - name: Check runner prerequisites
+        env:
+          CARGO_JOBS: ${{ vars.CARGO_JOBS }}
+        run: |
+          set -uo pipefail
+          # rustup instala en ~/.cargo/bin, que el servicio del runner no tiene en el PATH.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+          packages="build-essential clang cmake pkg-config git python3 xvfb openbox mesa-vulkan-drivers libasound2-dev libfontconfig-dev libfreetype-dev libssl-dev libvulkan-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev"
+          check() {
+            missing=()
+            for cmd in git cc clang cmake pkg-config python3 xvfb-run openbox; do
+              command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+            done
+            for module in alsa fontconfig freetype2 openssl vulkan wayland-client x11-xcb xcb xkbcommon xkbcommon-x11 libzstd; do
+              pkg-config --exists "$module" 2>/dev/null || missing+=("$module (pkg-config)")
+            done
+          }
+          check
+          if [ "${#missing[@]}" -gt 0 ] && [ "${EPHEMERAL_RUNNER:-}" = "true" ]; then
+            echo "Maquina efimera: instalando ${missing[*]}"
+            # shellcheck disable=SC2086
+            sudo apt-get update -qq && sudo apt-get install -y -qq $packages
+            check
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Faltan en el runner: ${missing[*]}"
+            echo "Instalar con:"
+            echo "  sudo apt-get update && sudo apt-get install -y $packages"
+            exit 1
+          fi
+
+          if ! command -v rustup >/dev/null 2>&1; then
+            echo "::error::Falta Rust en el runner"
+            echo "Instalar con:"
+            echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+            exit 1
+          fi
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default stable
+
+          if [ "${EPHEMERAL_RUNNER:-}" != "true" ]; then
+            # actions/checkout limpia native/target en cada run: en el runner
+            # propio la compilación se guarda fuera del workspace para que sea
+            # incremental. Se puede borrar sin más si ocupa demasiado.
+            echo "CARGO_TARGET_DIR=$HOME/.cache/mergeon-ci/native-target" >> "$GITHUB_ENV"
+          fi
+          # Límite de procesos de compilación para máquinas con poca RAM.
+          if [ -n "${CARGO_JOBS:-}" ]; then
+            echo "CARGO_BUILD_JOBS=$CARGO_JOBS" >> "$GITHUB_ENV"
+          fi
+          echo "Runner OK ($RUNNER_ENVIRONMENT): $(uname -a), $(rustc --version)"
+
+      - name: Cache cargo (maquina efimera)
+        if: env.EPHEMERAL_RUNNER == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: quality-linux
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: tools/in-x.sh cargo test --workspace --locked
+
+      - name: Check packaging scripts
+        run: |
+          set -euo pipefail
+          for script in packaging/*.sh packaging/*/*.sh tools/*.sh; do
+            bash -n "$script"
+          done
+          python3 -m py_compile packaging/update-manifest.py
+          echo "Version del workspace: $(source packaging/common.sh && mergeon_version)"
+
+  cross:
+    name: Build check (${{ matrix.name }})
+    if: github.event_name != 'push' || vars.CI_CROSS == 'always'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.windows_only && '[{"name":"Windows","os":"windows-latest"}]' || '[{"name":"Windows","os":"windows-latest"},{"name":"macOS","os":"macos-latest"}]') }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: native
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          # En Windows `link.exe` es muy lento enlazando los ~20 binarios de test
+          # de GPUI; si `lld-link` está instalado en el runner, se usa en su lugar.
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then
+            if command -v lld-link >/dev/null 2>&1; then
+              echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link" >> "$GITHUB_ENV"
+            elif [ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]; then
+              echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=C:/Program Files/LLVM/bin/lld-link.exe" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      # GPUI compila sus shaders de Metal al construirse; desde Xcode 26 el
+      # compilador de Metal es un componente aparte.
+      - name: Ensure Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: quality-${{ matrix.os }}
+          # Los tests de Windows pueden fallar tras ~30 min de compilación:
+          # se guarda igual para que la siguiente pasada no empiece de cero.
+          cache-on-failure: true
+
+      # En macOS solo se compila (cada minuto cuenta x10 en un repositorio
+      # privado). En Windows `cargo test --workspace` ya compila y enlaza el
+      # binario principal (`crates/mergeon/src/main.rs`), así que un `build`
+      # previo duplicaría compilación y enlace.
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build -p mergeon --locked
+
+      # Toda la suite también en Windows (rutas con `\`, CRLF, procesos de git,
+      # abrir carpetas/editor): los tests de interfaz usan la plataforma de
+      # pruebas de GPUI y no necesitan escritorio. Sin debuginfo en tests para
+      # evitar PDBs enormes y recortar tiempo de enlace en MSVC.
+      - name: Tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TEST_ARGS: ${{ inputs.test_args }}
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --locked --no-fail-fast ${TEST_ARGS:---workspace}

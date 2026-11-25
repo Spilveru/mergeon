@@ -1,0 +1,13 @@
+#!/bin/sh
+# El paquete de la versión Electron (mismo nombre, "mergeon") registraba
+# /usr/bin/mergeon como alternativa hacia /opt/Mergeon/mergeon. Este paquete
+# trae /usr/bin/mergeon como archivo propio: hay que retirar la alternativa
+# antes de desempaquetar, o quedaría apuntando a un binario que ya no existe.
+set -e
+
+if command -v update-alternatives >/dev/null 2>&1 \
+  && update-alternatives --query mergeon >/dev/null 2>&1; then
+  update-alternatives --remove-all mergeon >/dev/null 2>&1 || true
+fi
+
+exit 0

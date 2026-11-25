@@ -1,0 +1,27 @@
+# Compilación (native/ tiene además su propio .gitignore para target/)
+dist/
+release/
+
+# Logs
+*.log
+
+# Editores y sistema
+.vscode/
+.idea
+.DS_Store
+*.sw?
+Thumbs.db
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Herramientas locales de agentes
+.claude/
+.agents/
+.codex/
+
+# Python
+__pycache__/
+*.pyc

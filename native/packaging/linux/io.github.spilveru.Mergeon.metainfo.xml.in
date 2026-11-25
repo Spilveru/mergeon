@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.spilveru.Mergeon</id>
+  <name>Mergeon</name>
+  <summary>Cross-platform desktop Git client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.spilveru">
+    <name>Spilveru</name>
+  </developer>
+  <description>
+    <p>
+      Mergeon is a desktop Git client: commit history with graph, branches,
+      remotes, tags, stashes and submodules; staging by file or by hunk; merge,
+      rebase, cherry-pick and conflict resolution; and GitHub sign-in to clone
+      and open your repositories.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.spilveru.Mergeon.desktop</launchable>
+  <url type="homepage">https://github.com/Spilveru/mergeon</url>
+  <provides>
+    <binary>mergeon</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+    <category>RevisionControl</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

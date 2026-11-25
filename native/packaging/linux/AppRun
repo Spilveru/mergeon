@@ -1,0 +1,43 @@
+#!/bin/sh
+# Punto de entrada del AppImage de Mergeon.
+#
+# El runtime del AppImage exporta APPIMAGE (ruta del archivo .AppImage): el
+# actualizador de la app la usa para saber que puede reemplazarse a sí mismo.
+set -u
+
+HERE="$(dirname "$(readlink -f "$0")")"
+BIN="$HERE/usr/bin/mergeon"
+
+# ARGV0 lo define el runtime y zsh lo interpreta como "nombre con el que
+# lanzar el siguiente comando": no debe llegar a las terminales, editores o
+# hooks de git que la app abra.
+unset ARGV0
+
+# Canal de actualizaciones fijado al empaquetar (APP_UPDATE_FEED_URL en
+# build-linux.sh). Una variable ya definida en el entorno tiene prioridad.
+if [ -z "${APP_UPDATE_FEED_URL:-}" ] && [ -r "$HERE/usr/share/mergeon/update-feed-url" ]; then
+  APP_UPDATE_FEED_URL="$(cat "$HERE/usr/share/mergeon/update-feed-url")"
+  export APP_UPDATE_FEED_URL
+fi
+
+# Las bibliotecas del sistema gráfico (xcb, xkbcommon, Vulkan, Wayland) son las
+# del equipo, no van dentro del AppImage. Si falta alguna, el cargador dinámico
+# solo lo diría por stderr, que nadie ve al abrir la app con doble clic.
+if command -v ldd >/dev/null 2>&1; then
+  missing="$(ldd "$BIN" 2>/dev/null | awk '/not found/ { print $1 }' | tr '\n' ' ')"
+  if [ -n "$missing" ]; then
+    message="Mergeon cannot start: missing system libraries: $missing
+Install them with your package manager (Debian/Ubuntu: libxcb1 libxkbcommon0 libxkbcommon-x11-0)."
+    echo "$message" >&2
+    if command -v zenity >/dev/null 2>&1; then
+      zenity --error --title="Mergeon" --text="$message" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1; then
+      kdialog --title "Mergeon" --error "$message" 2>/dev/null
+    elif command -v notify-send >/dev/null 2>&1; then
+      notify-send "Mergeon" "$message" 2>/dev/null
+    fi
+    exit 127
+  fi
+fi
+
+exec "$BIN" "$@"

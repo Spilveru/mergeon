@@ -1,0 +1,20 @@
+[package]
+name = "mergeon-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+mergeon-gitcmd = { path = "../mergeon-gitcmd" }
+# Misma versión que ya trae el workspace (vía GPUI), para no duplicarla.
+notify = "7.0.0"
+# Reglas de `.gitignore` para no vigilar lo que el repositorio ignora (ya en el
+# lockfile vía GPUI).
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true

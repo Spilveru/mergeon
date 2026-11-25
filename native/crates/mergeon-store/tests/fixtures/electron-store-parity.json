@@ -1,0 +1,488 @@
+{
+  "fresh": {
+    "githubAccounts": [],
+    "activeGithubAccountId": null,
+    "recentRepositories": [],
+    "workspaceSession": {
+      "openRepositories": [],
+      "activeRepositoryPath": null,
+      "repositoryWorkspaces": {}
+    },
+    "settings": {
+      "theme": "dark",
+      "autoFetch": true,
+      "maxRecentRepos": 10,
+      "sidebarWidth": null,
+      "sidebarSections": {
+        "starred": true,
+        "branches": true,
+        "remotes": false,
+        "tags": false,
+        "stashes": false,
+        "submodules": false
+      },
+      "commitView": {
+        "historyWidth": null,
+        "fileListWidth": null,
+        "diffViewMode": "unified",
+        "ignoreWhitespace": false
+      }
+    },
+    "starredBranches": {}
+  },
+  "r1": [
+    {
+      "id": "/w/a",
+      "name": "a",
+      "path": "/w/a",
+      "currentBranch": "main",
+      "isGitHub": false,
+      "remoteUrl": "",
+      "lastOpened": "2026-10-02T03:22:08.719Z"
+    }
+  ],
+  "r2": [
+    {
+      "id": "/w/a",
+      "name": "a",
+      "path": "/w/a",
+      "currentBranch": "dev",
+      "isGitHub": false,
+      "remoteUrl": "",
+      "lastOpened": "2026-10-02T03:22:08.723Z"
+    },
+    {
+      "id": "/w/c",
+      "name": "c",
+      "path": "/w/c",
+      "currentBranch": "main",
+      "isGitHub": false,
+      "remoteUrl": "",
+      "lastOpened": "2026-10-02T03:22:08.722Z"
+    },
+    {
+      "id": "/w/b",
+      "name": "b",
+      "path": "/w/b",
+      "currentBranch": "HEAD",
+      "isGitHub": true,
+      "remoteUrl": "https://github.com/o/b.git",
+      "lastOpened": "2026-10-02T03:22:08.721Z"
+    }
+  ],
+  "session": {
+    "repositoryWorkspaces": {
+      "/w/a": {
+        "layoutVersion": 2,
+        "tabs": []
+      }
+    },
+    "openRepositories": [
+      "/w/a",
+      "/w/b"
+    ],
+    "activeRepositoryPath": null
+  },
+  "sessionRead": {
+    "repositoryWorkspaces": {
+      "/w/a": {
+        "layoutVersion": 2,
+        "tabs": []
+      }
+    },
+    "openRepositories": [
+      "/w/a",
+      "/w/b"
+    ],
+    "activeRepositoryPath": null
+  },
+  "settings0": {
+    "theme": "dark",
+    "autoFetch": true,
+    "maxRecentRepos": 10,
+    "sidebarWidth": null,
+    "sidebarSections": {
+      "starred": true,
+      "branches": true,
+      "remotes": false,
+      "tags": false,
+      "stashes": false,
+      "submodules": false
+    },
+    "commitView": {
+      "historyWidth": null,
+      "fileListWidth": null,
+      "diffViewMode": "unified",
+      "ignoreWhitespace": false
+    }
+  },
+  "settings1": {
+    "theme": "light",
+    "autoFetch": false,
+    "maxRecentRepos": 2,
+    "sidebarWidth": 312,
+    "sidebarSections": {
+      "starred": false,
+      "branches": true,
+      "remotes": false,
+      "tags": true,
+      "stashes": false,
+      "submodules": false
+    },
+    "commitView": {
+      "historyWidth": 450,
+      "fileListWidth": 280,
+      "diffViewMode": "split",
+      "ignoreWhitespace": true
+    },
+    "autoFetchIntervalMinutes": 25
+  },
+  "settings2": {
+    "theme": "light",
+    "autoFetch": false,
+    "maxRecentRepos": 2,
+    "sidebarWidth": null,
+    "sidebarSections": {
+      "starred": false,
+      "branches": true,
+      "remotes": false,
+      "tags": true,
+      "stashes": false,
+      "submodules": false
+    },
+    "commitView": {
+      "historyWidth": null,
+      "fileListWidth": 280,
+      "diffViewMode": "split",
+      "ignoreWhitespace": true
+    },
+    "autoFetchIntervalMinutes": 25
+  },
+  "r3": [
+    {
+      "id": "/w/d",
+      "name": "d",
+      "path": "/w/d",
+      "currentBranch": "main",
+      "isGitHub": false,
+      "remoteUrl": "",
+      "lastOpened": "2026-10-02T03:22:08.731Z"
+    },
+    {
+      "id": "/w/a",
+      "name": "a",
+      "path": "/w/a",
+      "currentBranch": "dev",
+      "isGitHub": false,
+      "remoteUrl": "",
+      "lastOpened": "2026-10-02T03:22:08.723Z"
+    }
+  ],
+  "star1": [
+    "main"
+  ],
+  "star2": [
+    "main",
+    "dev"
+  ],
+  "star3": [
+    "dev"
+  ],
+  "star4": [],
+  "saved1": {
+    "id": "1",
+    "username": "octocat",
+    "name": "OCTOCAT",
+    "email": "",
+    "avatarUrl": "https://avatar",
+    "isPersonalAccessToken": false,
+    "expiresAt": null,
+    "installUrl": null,
+    "requiresInstallation": false,
+    "installations": [],
+    "activeInstallationId": null,
+    "addedAt": "2026-07-26T00:00:00.000Z",
+    "requiresReconnect": false,
+    "token": "gho_one",
+    "tokenCipher": "plain:gho_one",
+    "refreshToken": "",
+    "refreshTokenCipher": "",
+    "sessionToken": "",
+    "sessionTokenCipher": ""
+  },
+  "saved2": {
+    "id": "2",
+    "username": "hubot",
+    "name": "HUBOT",
+    "email": "",
+    "avatarUrl": "https://avatar",
+    "isPersonalAccessToken": false,
+    "expiresAt": "2026-07-26T08:00:00.000Z",
+    "installUrl": "https://github.com/apps/x/installations/new",
+    "requiresInstallation": false,
+    "installations": [
+      {
+        "id": 42,
+        "account": "hubot",
+        "avatarUrl": null,
+        "repositorySelection": "all"
+      }
+    ],
+    "activeInstallationId": 42,
+    "addedAt": "2026-07-26T00:00:00.000Z",
+    "requiresReconnect": false,
+    "token": "gho_two",
+    "tokenCipher": "plain:gho_two",
+    "refreshToken": "ghr_two",
+    "refreshTokenCipher": "plain:ghr_two",
+    "sessionToken": "",
+    "sessionTokenCipher": ""
+  },
+  "accounts": [
+    {
+      "id": "1",
+      "username": "octocat",
+      "name": "OCTOCAT",
+      "email": "",
+      "avatarUrl": "https://avatar",
+      "isPersonalAccessToken": false,
+      "expiresAt": null,
+      "installUrl": null,
+      "requiresInstallation": false,
+      "installations": [],
+      "activeInstallationId": null,
+      "addedAt": "2026-07-26T00:00:00.000Z",
+      "requiresReconnect": false,
+      "token": "gho_one",
+      "tokenCipher": "plain:gho_one",
+      "refreshToken": "",
+      "refreshTokenCipher": "",
+      "sessionToken": "",
+      "sessionTokenCipher": ""
+    },
+    {
+      "id": "2",
+      "username": "hubot",
+      "name": "HUBOT",
+      "email": "",
+      "avatarUrl": "https://avatar",
+      "isPersonalAccessToken": false,
+      "expiresAt": "2026-07-26T08:00:00.000Z",
+      "installUrl": "https://github.com/apps/x/installations/new",
+      "requiresInstallation": false,
+      "installations": [
+        {
+          "id": 42,
+          "account": "hubot",
+          "avatarUrl": null,
+          "repositorySelection": "all"
+        }
+      ],
+      "activeInstallationId": 42,
+      "addedAt": "2026-07-26T00:00:00.000Z",
+      "requiresReconnect": false,
+      "token": "gho_two",
+      "tokenCipher": "plain:gho_two",
+      "refreshToken": "ghr_two",
+      "refreshTokenCipher": "plain:ghr_two",
+      "sessionToken": "",
+      "sessionTokenCipher": ""
+    }
+  ],
+  "beforeRemove": {
+    "githubAccounts": [
+      {
+        "id": "1",
+        "username": "octocat",
+        "name": "OCTOCAT",
+        "email": "",
+        "avatarUrl": "https://avatar",
+        "isPersonalAccessToken": false,
+        "expiresAt": null,
+        "installUrl": null,
+        "requiresInstallation": false,
+        "installations": [],
+        "activeInstallationId": null,
+        "addedAt": "2026-07-26T00:00:00.000Z",
+        "requiresReconnect": false,
+        "tokenCipher": "plain:gho_one",
+        "refreshTokenCipher": "",
+        "sessionTokenCipher": ""
+      },
+      {
+        "id": "2",
+        "username": "hubot",
+        "name": "HUBOT",
+        "email": "",
+        "avatarUrl": "https://avatar",
+        "isPersonalAccessToken": false,
+        "expiresAt": "2026-07-26T08:00:00.000Z",
+        "installUrl": "https://github.com/apps/x/installations/new",
+        "requiresInstallation": false,
+        "installations": [
+          {
+            "id": 42,
+            "account": "hubot",
+            "avatarUrl": null,
+            "repositorySelection": "all"
+          }
+        ],
+        "activeInstallationId": 42,
+        "addedAt": "2026-07-26T00:00:00.000Z",
+        "requiresReconnect": false,
+        "tokenCipher": "plain:gho_two",
+        "refreshTokenCipher": "plain:ghr_two",
+        "sessionTokenCipher": ""
+      }
+    ],
+    "activeGithubAccountId": "1",
+    "recentRepositories": [
+      {
+        "id": "/w/d",
+        "name": "d",
+        "path": "/w/d",
+        "currentBranch": "main",
+        "isGitHub": false,
+        "remoteUrl": "",
+        "lastOpened": "2026-10-02T03:22:08.731Z"
+      },
+      {
+        "id": "/w/a",
+        "name": "a",
+        "path": "/w/a",
+        "currentBranch": "dev",
+        "isGitHub": false,
+        "remoteUrl": "",
+        "lastOpened": "2026-10-02T03:22:08.723Z"
+      }
+    ],
+    "workspaceSession": {
+      "repositoryWorkspaces": {
+        "/w/a": {
+          "layoutVersion": 2,
+          "tabs": []
+        }
+      },
+      "openRepositories": [
+        "/w/a",
+        "/w/b"
+      ],
+      "activeRepositoryPath": null
+    },
+    "settings": {
+      "theme": "light",
+      "autoFetch": false,
+      "maxRecentRepos": 2,
+      "sidebarWidth": null,
+      "sidebarSections": {
+        "starred": false,
+        "branches": true,
+        "remotes": false,
+        "tags": true,
+        "stashes": false,
+        "submodules": false
+      },
+      "commitView": {
+        "historyWidth": null,
+        "fileListWidth": 280,
+        "diffViewMode": "split",
+        "ignoreWhitespace": true
+      },
+      "autoFetchIntervalMinutes": 25
+    },
+    "starredBranches": {
+      "/w/a": [
+        "dev"
+      ],
+      "/w/zzz": []
+    }
+  },
+  "active": null,
+  "sessionCleared": {
+    "openRepositories": [],
+    "activeRepositoryPath": null,
+    "repositoryWorkspaces": {}
+  },
+  "final": {
+    "githubAccounts": [
+      {
+        "id": "2",
+        "username": "hubot",
+        "name": "HUBOT",
+        "email": "",
+        "avatarUrl": "https://avatar",
+        "isPersonalAccessToken": false,
+        "expiresAt": "2026-07-26T08:00:00.000Z",
+        "installUrl": "https://github.com/apps/x/installations/new",
+        "requiresInstallation": false,
+        "installations": [
+          {
+            "id": 42,
+            "account": "hubot",
+            "avatarUrl": null,
+            "repositorySelection": "all"
+          }
+        ],
+        "activeInstallationId": 42,
+        "addedAt": "2026-07-26T00:00:00.000Z",
+        "requiresReconnect": false,
+        "tokenCipher": "plain:gho_two",
+        "refreshTokenCipher": "plain:ghr_two",
+        "sessionTokenCipher": ""
+      }
+    ],
+    "activeGithubAccountId": null,
+    "recentRepositories": [
+      {
+        "id": "/w/d",
+        "name": "d",
+        "path": "/w/d",
+        "currentBranch": "main",
+        "isGitHub": false,
+        "remoteUrl": "",
+        "lastOpened": "2026-10-02T03:22:08.731Z"
+      },
+      {
+        "id": "/w/a",
+        "name": "a",
+        "path": "/w/a",
+        "currentBranch": "dev",
+        "isGitHub": false,
+        "remoteUrl": "",
+        "lastOpened": "2026-10-02T03:22:08.723Z"
+      }
+    ],
+    "workspaceSession": {
+      "openRepositories": [],
+      "activeRepositoryPath": null,
+      "repositoryWorkspaces": {}
+    },
+    "settings": {
+      "theme": "light",
+      "autoFetch": false,
+      "maxRecentRepos": 2,
+      "sidebarWidth": null,
+      "sidebarSections": {
+        "starred": false,
+        "branches": true,
+        "remotes": false,
+        "tags": true,
+        "stashes": false,
+        "submodules": false
+      },
+      "commitView": {
+        "historyWidth": null,
+        "fileListWidth": 280,
+        "diffViewMode": "split",
+        "ignoreWhitespace": true
+      },
+      "autoFetchIntervalMinutes": 25
+    },
+    "starredBranches": {
+      "/w/a": [
+        "dev"
+      ],
+      "/w/zzz": []
+    }
+  }
+}

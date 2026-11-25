@@ -1,0 +1,38 @@
+[package]
+name = "mergeon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+regex.workspace = true
+env_logger = "0.11"
+futures = "0.3"
+gpui-kit.workspace = true
+mergeon-ui.workspace = true
+mergeon-app.workspace = true
+mergeon-model.workspace = true
+mergeon-backend.workspace = true
+mergeon-gitcmd.workspace = true
+mergeon-updater.workspace = true
+mergeon-github.workspace = true
+mergeon-view-toolbar.workspace = true
+mergeon-view-changes.workspace = true
+mergeon-view-commits.workspace = true
+mergeon-view-diff.workspace = true
+mergeon-view-home.workspace = true
+mergeon-view-sidebar.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+
+# Solo lo usa build.rs cuando el destino es Windows (ícono y metadatos de
+# versión de mergeon.exe). Ver native/docs/packaging.md.
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }

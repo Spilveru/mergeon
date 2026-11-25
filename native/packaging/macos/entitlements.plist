@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Solo se aplican al firmar con Developer ID (hardened runtime). A diferencia
+    de la versión Electron (build/entitlements.mac.plist), el binario nativo no
+    necesita JIT, memoria ejecutable sin firmar ni desactivar la validación de
+    bibliotecas. Se conserva la automatización por Apple Events de aquella.
+  -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

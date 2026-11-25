@@ -1,0 +1,64 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in Mergeon
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! For security vulnerabilities, please use [GitHub Security Advisories](https://github.com/Spilveru/mergeon/security/advisories/new) instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the behavior.
+      placeholder: |
+        1. Open repository ...
+        2. Click on ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux (AppImage)
+        - Linux (.deb)
+        - Linux (built from source)
+        - Windows
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mergeon version
+      placeholder: "e.g. 0.14.0"
+    validations:
+      required: true
+  - type: input
+    id: git-version
+    attributes:
+      label: Git version
+      placeholder: "Output of `git --version`"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Paste relevant logs (run with `RUST_LOG=mergeon=debug`) or drag-and-drop screenshots.
+      render: shell

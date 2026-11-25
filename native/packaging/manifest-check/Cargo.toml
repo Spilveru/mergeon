@@ -1,0 +1,13 @@
+[package]
+name = "mergeon-manifest-check"
+description = "Comprueba los manifiestos latest*.yml del empaquetado con el parser del actualizador"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mergeon-updater.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

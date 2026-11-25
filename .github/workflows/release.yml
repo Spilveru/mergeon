@@ -1,0 +1,459 @@
+name: Release
+
+# Publica los instaladores de Mergeon (Rust + GPUI, en native/) en GitHub
+# Releases. Corre con tags vX.Y.Z o a mano desde la pestaña Actions.
+#
+# UN job (prepare) crea el release como borrador, cada job de build sube sus
+# artefactos y su manifiesto de actualizacion (latest*.yml) a ese borrador, y
+# un ultimo job (publish) lo publica cuando todos los builds pedidos
+# terminaron bien. La app instalada se actualiza desde releases/latest, asi que
+# el release se publica como "latest" salvo RELEASE_PRERELEASE=true.
+#
+# Runners y variables de repositorio (Settings > Secrets and variables > Actions):
+#   CI_RUNNER                   runner de prepare, linux y publish. Por defecto
+#                               ubuntu-latest; self-hosted = runner propio (con
+#                               docker) u otra etiqueta personalizada.
+#   RELEASE_WINDOWS=false       no construye Windows.
+#   RELEASE_MAC=true            construye macOS (macos-latest).
+#   MAC_ARCH                    arm64 (por defecto), x86_64 o universal.
+#   RELEASE_PRERELEASE=true     publica como prerelease: no toca
+#                               releases/latest, asi que las apps instaladas
+#                               no se actualizan a esta version.
+#   CARGO_JOBS                  limite de procesos de compilacion (poca RAM).
+#   APP_UPDATE_FEED_URL         canal HTTPS de actualizaciones fijado al compilar.
+#   MERGEON_UPDATE_PUBLIC_KEY   clave publica Ed25519 (32 bytes en base64) fijada
+#                               al compilar para verificar `latest*.yml.sig`.
+# Secretos:
+#   MERGEON_UPDATE_SIGNING_KEY  clave privada Ed25519 (PKCS#8 base64) para firmar
+#                               `latest*.yml` → `latest*.yml.sig`. Generar con:
+#                               `cargo run -p mergeon-manifest-check -- keygen`
+#   macOS (opcionales): CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
+#   APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID. Sin ellos la app se firma ad-hoc.
+#
+# Detalle en native/docs/packaging.md.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Dos runs sobre el mismo tag se pisarian al subir artefactos.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Runner de los jobs Linux: ubuntu-latest por defecto (ver cabecera).
+  EPHEMERAL_RUNNER: ${{ vars.CI_RUNNER != 'self-hosted' }}
+
+jobs:
+  prepare:
+    runs-on: ${{ vars.CI_RUNNER == 'github' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      windows: ${{ steps.resolve.outputs.windows }}
+      mac: ${{ steps.resolve.outputs.mac }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check runner prerequisites
+        shell: bash
+        run: |
+          set -uo pipefail
+          check() {
+            missing=()
+            for cmd in git gh; do
+              command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+            done
+          }
+          check
+          if [ "${#missing[@]}" -gt 0 ] && [ "${EPHEMERAL_RUNNER:-}" = "true" ]; then
+            echo "Maquina efimera: instalando ${missing[*]}"
+            sudo apt-get update -qq && sudo apt-get install -y -qq git gh
+            check
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Faltan en el runner: ${missing[*]}"
+            echo "Instalar con:"
+            echo "  sudo apt-get update && sudo apt-get install -y git gh"
+            exit 1
+          fi
+          echo "Runner OK ($RUNNER_ENVIRONMENT): $(uname -a)"
+
+      - name: Resolve tag
+        id: resolve
+        shell: bash
+        env:
+          RELEASE_WINDOWS: ${{ vars.RELEASE_WINDOWS }}
+          RELEASE_MAC: ${{ vars.RELEASE_MAC }}
+        run: |
+          set -euo pipefail
+          # La version es la de [workspace.package] en native/Cargo.toml: la que
+          # el binario lleva dentro y la que compara el actualizador.
+          version="$(source native/packaging/common.sh && mergeon_version)"
+          [ -n "$version" ] || { echo "::error::No se pudo leer la version de native/Cargo.toml"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            # Disparo manual: el tag sale de la version del workspace.
+            tag="v$version"
+          fi
+          # Los artefactos y los manifiestos llevan la version del binario: un tag
+          # distinto publicaria un release que dice una cosa y contiene otra.
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::El tag $tag no coincide con la version de native/Cargo.toml ($version)"
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            if [ "${RELEASE_WINDOWS:-}" = "false" ]; then echo "windows=false"; else echo "windows=true"; fi
+            if [ "${RELEASE_MAC:-}" = "true" ]; then echo "mac=true"; else echo "mac=false"; fi
+          } >> "$GITHUB_OUTPUT"
+          echo "Release objetivo: $tag (Linux; Windows: ${RELEASE_WINDOWS:-true}; macOS: ${RELEASE_MAC:-false})"
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "El release $TAG ya existe; se reutiliza."
+          else
+            gh release create "$TAG" \
+              --draft \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "$VERSION" \
+              --generate-notes
+          fi
+
+  linux:
+    needs: prepare
+    runs-on: ${{ vars.CI_RUNNER == 'github' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check runner prerequisites
+        shell: bash
+        env:
+          CARGO_JOBS: ${{ vars.CARGO_JOBS }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # La compilacion va dentro de un contenedor (glibc antigua, ver
+          # native/packaging/linux/Dockerfile); fuera solo hacen falta docker,
+          # gh, python3 y cargo (para comprobar el manifiesto).
+          missing=()
+          for cmd in git gh docker python3 cargo; do
+            command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Faltan en el runner: ${missing[*]}"
+            echo "Instalar con:"
+            echo "  sudo apt-get update && sudo apt-get install -y git gh docker.io python3"
+            echo "  sudo usermod -aG docker \$USER   # y reiniciar el servicio del runner"
+            echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+            exit 1
+          fi
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::El usuario del runner no puede usar docker (sudo usermod -aG docker \$USER)"
+            exit 1
+          fi
+          # actions/checkout limpia native/target en cada run: la compilacion y
+          # las descargas se guardan fuera del workspace para que sea incremental.
+          {
+            echo "MERGEON_CONTAINER_TARGET_DIR=$HOME/.cache/mergeon-ci/linux-container-target"
+            echo "MERGEON_TOOLS_CACHE_DIR=$HOME/.cache/mergeon-packaging"
+            echo "CARGO_TARGET_DIR=$HOME/.cache/mergeon-ci/native-target"
+            if [ -n "${CARGO_JOBS:-}" ]; then echo "CARGO_BUILD_JOBS=$CARGO_JOBS"; fi
+          } >> "$GITHUB_ENV"
+          echo "Runner OK ($RUNNER_ENVIRONMENT): $(uname -a)"
+
+      - name: Cache cargo (maquina efimera)
+        if: env.EPHEMERAL_RUNNER == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/mergeon-ci
+            ~/.cache/mergeon-packaging
+          key: native-release-linux-${{ hashFiles('native/Cargo.lock', 'native/packaging/linux/Dockerfile') }}
+          restore-keys: native-release-linux-
+
+      - name: Build AppImage and .deb
+        shell: bash
+        env:
+          CARGO_BUILD_FLAGS: --locked
+          APP_UPDATE_FEED_URL: ${{ vars.APP_UPDATE_FEED_URL }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+        run: native/packaging/linux/build-in-container.sh
+
+      - name: Generate, sign and verify update manifest
+        shell: bash
+        env:
+          MERGEON_UPDATE_SIGNING_KEY: ${{ secrets.MERGEON_UPDATE_SIGNING_KEY }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python3 native/packaging/update-manifest.py --platform linux --version "$VERSION" --dir native/dist
+          cat native/dist/latest-linux.yml
+          check_args=(native/dist/latest-linux.yml --platform linux --arch x64 --version "$VERSION")
+          if [ -n "${MERGEON_UPDATE_SIGNING_KEY:-}" ]; then
+            cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+              sign native/dist/latest-linux.yml
+            if [ -n "${MERGEON_UPDATE_PUBLIC_KEY:-}" ]; then
+              check_args+=(--public-key "$MERGEON_UPDATE_PUBLIC_KEY")
+            fi
+          fi
+          # El mismo parser y la misma seleccion de artefacto que usa la app instalada.
+          cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+            "${check_args[@]}"
+
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets=(
+            "native/dist/Mergeon-$VERSION.AppImage"
+            "native/dist/mergeon_${VERSION}_amd64.deb"
+            "native/dist/latest-linux.yml"
+          )
+          if [ -f "native/dist/latest-linux.yml.sig" ]; then
+            assets+=("native/dist/latest-linux.yml.sig")
+          fi
+          gh release upload "$TAG" --clobber "${assets[@]}"
+
+  windows:
+    needs: prepare
+    if: needs.prepare.outputs.windows == 'true'
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust and NSIS
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          if ! command -v makensis >/dev/null 2>&1 && [ ! -x "/c/Program Files (x86)/NSIS/makensis.exe" ]; then
+            choco install nsis -y --no-progress
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: native-release-windows
+
+      - name: Build NSIS installer
+        shell: bash
+        env:
+          CARGO_BUILD_FLAGS: --locked
+          APP_UPDATE_FEED_URL: ${{ vars.APP_UPDATE_FEED_URL }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+        run: native/packaging/windows/build-windows.sh
+
+      - name: Generate, sign and verify update manifest
+        shell: bash
+        env:
+          MERGEON_UPDATE_SIGNING_KEY: ${{ secrets.MERGEON_UPDATE_SIGNING_KEY }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python native/packaging/update-manifest.py --platform windows --version "$VERSION" --dir native/dist
+          cat native/dist/latest.yml
+          check_args=(native/dist/latest.yml --platform windows --arch x64 --version "$VERSION")
+          if [ -n "${MERGEON_UPDATE_SIGNING_KEY:-}" ]; then
+            cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+              sign native/dist/latest.yml
+            if [ -n "${MERGEON_UPDATE_PUBLIC_KEY:-}" ]; then
+              check_args+=(--public-key "$MERGEON_UPDATE_PUBLIC_KEY")
+            fi
+          fi
+          cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+            "${check_args[@]}"
+
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets=(
+            "native/dist/Mergeon-Setup-$VERSION.exe"
+            "native/dist/latest.yml"
+          )
+          if [ -f "native/dist/latest.yml.sig" ]; then
+            assets+=("native/dist/latest.yml.sig")
+          fi
+          gh release upload "$TAG" --clobber "${assets[@]}"
+
+  macos:
+    needs: prepare
+    if: needs.prepare.outputs.mac == 'true'
+    runs-on: macos-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      MAC_ARCH: ${{ vars.MAC_ARCH || 'arm64' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          # GPUI compila sus shaders de Metal al construirse; desde Xcode 26 el
+          # compilador de Metal es un componente aparte.
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: native-release-macos-${{ env.MAC_ARCH }}
+
+      - name: Build, sign and zip Mergeon.app
+        shell: bash
+        env:
+          CARGO_BUILD_FLAGS: --locked
+          APP_UPDATE_FEED_URL: ${{ vars.APP_UPDATE_FEED_URL }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+          # Sin estos secretos la app se firma ad-hoc y no se notariza.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: native/packaging/macos/build-macos.sh --arch "$MAC_ARCH"
+
+      - name: Generate, sign and verify update manifest
+        shell: bash
+        env:
+          MERGEON_UPDATE_SIGNING_KEY: ${{ secrets.MERGEON_UPDATE_SIGNING_KEY }}
+          MERGEON_UPDATE_PUBLIC_KEY: ${{ vars.MERGEON_UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python3 native/packaging/update-manifest.py --platform mac --version "$VERSION" --dir native/dist
+          cat native/dist/latest-mac.yml
+          # Un zip x86_64 solo lo puede instalar un Mac Intel; los demas, Apple Silicon.
+          if [ "$MAC_ARCH" = "x86_64" ]; then check_arch=x64; else check_arch=arm64; fi
+          check_args=(native/dist/latest-mac.yml --platform mac --arch "$check_arch" --version "$VERSION")
+          if [ -n "${MERGEON_UPDATE_SIGNING_KEY:-}" ]; then
+            cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+              sign native/dist/latest-mac.yml
+            if [ -n "${MERGEON_UPDATE_PUBLIC_KEY:-}" ]; then
+              check_args+=(--public-key "$MERGEON_UPDATE_PUBLIC_KEY")
+            fi
+          fi
+          cargo run --quiet --locked --manifest-path native/Cargo.toml -p mergeon-manifest-check -- \
+            "${check_args[@]}"
+
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets=(
+            native/dist/Mergeon-"$VERSION"-*mac.zip
+            native/dist/latest-mac.yml
+          )
+          if [ -f "native/dist/latest-mac.yml.sig" ]; then
+            assets+=("native/dist/latest-mac.yml.sig")
+          fi
+          gh release upload "$TAG" --clobber "${assets[@]}"
+
+  publish:
+    # Solo corre si todos los builds pedidos subieron sus artefactos. Si alguno
+    # falla, el release se queda en borrador y no llega a los usuarios a medias.
+    needs: [prepare, linux, windows, macos]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.linux.result == 'success' &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      (needs.macos.result == 'success' || needs.macos.result == 'skipped')
+    runs-on: ${{ vars.CI_RUNNER == 'github' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Este job no hace checkout, asi que gh necesita saber el repo explicitamente.
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Verify release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          WITH_WINDOWS: ${{ needs.prepare.outputs.windows }}
+          WITH_MAC: ${{ needs.prepare.outputs.mac }}
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          echo "Artefactos en $TAG:"
+          echo "$assets"
+
+          patterns=('*.AppImage' '*.deb' 'latest-linux.yml')
+          if [ "$WITH_WINDOWS" = "true" ]; then
+            patterns+=('*.exe' 'latest.yml')
+          fi
+          if [ "$WITH_MAC" = "true" ]; then
+            patterns+=('*-mac.zip' 'latest-mac.yml')
+          fi
+
+          missing=0
+          for pattern in "${patterns[@]}"; do
+            found=0
+            while IFS= read -r name; do
+              # shellcheck disable=SC2254
+              case "$name" in
+                $pattern) found=1 ;;
+              esac
+            done <<< "$assets"
+            if [ "$found" -eq 0 ]; then
+              echo "::error::Falta un artefacto que coincida con '$pattern' en $TAG"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ vars.RELEASE_PRERELEASE }}
+        run: |
+          set -euo pipefail
+          if [ "${PRERELEASE:-}" = "true" ]; then
+            # Descargable a mano, pero releases/latest (de donde se actualiza la
+            # app instalada) sigue apuntando a la version anterior.
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          else
+            # A partir de aqui releases/latest/download/latest*.yml son estos
+            # manifiestos y las apps instaladas se actualizan a esta version.
+            gh release edit "$TAG" --draft=false --prerelease=false --latest
+          fi

@@ -1,0 +1,80 @@
+[workspace]
+exclude = ["vendor"]
+resolver = "3"
+members = [
+    "crates/mergeon-gitcmd",
+    "crates/mergeon-git-ops",
+    "crates/mergeon-git-query",
+    "crates/mergeon-runtime",
+    "crates/mergeon-store",
+    "crates/mergeon-github",
+    "crates/mergeon-model",
+    "crates/mergeon-updater",
+    "crates/mergeon-backend",
+    "crates/mergeon-app",
+    "crates/mergeon-ui",
+    "crates/mergeon-view-diff",
+    "crates/mergeon-view-changes",
+    "crates/mergeon-view-commits",
+    "crates/mergeon-view-toolbar",
+    "crates/mergeon-view-home",
+    "crates/mergeon-view-sidebar",
+    "crates/mergeon",
+    # Empaquetado: comprueba los latest*.yml con el parser del actualizador.
+    "packaging/manifest-check",
+]
+
+[workspace.package]
+version = "0.14.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+tempfile = "3"
+regex = "1"
+# Markdown del README del inicio (CommonMark + GFM), sin el renderizador HTML.
+pulldown-cmark = { version = "0.13", default-features = false }
+mergeon-gitcmd = { path = "crates/mergeon-gitcmd" }
+mergeon-git-ops = { path = "crates/mergeon-git-ops" }
+mergeon-git-query = { path = "crates/mergeon-git-query" }
+mergeon-runtime = { path = "crates/mergeon-runtime" }
+mergeon-store = { path = "crates/mergeon-store" }
+mergeon-github = { path = "crates/mergeon-github" }
+mergeon-model = { path = "crates/mergeon-model" }
+mergeon-ui = { path = "crates/mergeon-ui" }
+mergeon-view-diff = { path = "crates/mergeon-view-diff" }
+mergeon-view-changes = { path = "crates/mergeon-view-changes" }
+mergeon-view-commits = { path = "crates/mergeon-view-commits" }
+mergeon-view-toolbar = { path = "crates/mergeon-view-toolbar" }
+mergeon-view-home = { path = "crates/mergeon-view-home" }
+mergeon-view-sidebar = { path = "crates/mergeon-view-sidebar" }
+mergeon-updater = { path = "crates/mergeon-updater" }
+mergeon-backend = { path = "crates/mergeon-backend" }
+mergeon-app = { path = "crates/mergeon-app" }
+gpui-kit = { version = "0.7.0", features = ["tree-sitter-languages"] }
+
+# Las dependencias se compilan optimizadas también en dev: el render de GPUI en
+# opt-level 0 es demasiado lento para evaluar la app; el código propio queda
+# sin optimizar para que el ciclo de compilación sea corto.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Con `lto = "thin"` y el valor por defecto de `codegen-units` (16), LLVM
+# aprovecha todos los núcleos del runner en release casi sin cambiar tamaño ni
+# velocidad del binario (antes `codegen-units = 1` serializaba cada crate).
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+# GPUI con un cambio propio (ver vendor/gpui-pre/MERGEON.md).
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
