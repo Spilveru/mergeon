@@ -4328,7 +4328,7 @@ name = "mergeon-backend"
 version = "0.14.0"
 dependencies = [
  "aes-gcm",
- "base64 0.22.1",
+ "base64 0.23.1",
  "keyring",
  "log",
  "mergeon-git-ops",
@@ -4450,7 +4450,7 @@ dependencies = [
 name = "mergeon-updater"
 version = "0.14.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "log",
  "regex",
  "ring",

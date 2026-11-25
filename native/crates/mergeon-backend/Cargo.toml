@@ -24,7 +24,7 @@ url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 # Cifrado autenticado de los tokens con la clave maestra del llavero.
 aes-gcm = "0.11"
-base64 = "0.22"
+base64 = "0.23"
 # Llavero del sistema (el papel de `safeStorage`). Backends nativos en Windows
 # y macOS; en Linux, Secret Service por D-Bus con la implementación en Rust
 # puro (`async-secret-service` + `async-io` + `crypto-rust`): no enlaza con

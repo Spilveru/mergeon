@@ -14,7 +14,7 @@ regex.workspace = true
 ureq = "3.4"
 # Verificación del sha512 (en base64) y firma Ed25519 de manifiestos.
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 ring = "0.17"
 
 [dev-dependencies]
