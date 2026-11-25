@@ -47,4 +47,6 @@ pub use settings::{
     SidebarSectionsUpdate, Theme,
 };
 pub use store::{ElectronImport, LoadReport, LoadStatus, Store, StoreOptions};
-pub use types::{GitHubAccount, GitHubInstallation, RecentRepository, WorkspaceSession};
+pub use types::{
+    GitHubAccount, GitHubInstallation, RecentRepository, RepoWorkspace, WorkspaceSession,
+};

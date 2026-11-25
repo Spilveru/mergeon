@@ -43,9 +43,9 @@ impl AppModel {
     // Nombres
     // ------------------------------------------------------------------
 
-    /// Nombres de las pestañas de repositorio, en su orden.
+    /// Nombres de las pestañas de repositorio visibles, en su orden.
     pub fn repository_tab_labels(&self) -> Vec<RepositoryTabLabel> {
-        let repositories = self.open_repositories();
+        let repositories = self.visible_repositories();
         let suffixes = distinguishing_parent_suffixes(
             repositories
                 .iter()
@@ -61,13 +61,29 @@ impl AppModel {
             .collect()
     }
 
-    /// El nombre de la pestaña de un repositorio abierto, por ruta.
+    /// El nombre de la pestaña de un repositorio abierto, por ruta. Prioriza
+    /// los visibles en el workspace activo y cae al conjunto total de abiertos
+    /// si el repositorio está oculto en otro workspace.
     pub fn repository_label(&self, repo_path: &str) -> Option<RepositoryTabLabel> {
-        let index = self
-            .open_repositories()
+        let visible = self.visible_repositories();
+        if let Some(index) = visible
+            .iter()
+            .position(|repository| repository.path == repo_path)
+        {
+            return self.repository_tab_labels().into_iter().nth(index);
+        }
+        let all = self.open_repositories();
+        let index = all
             .iter()
             .position(|repository| repository.path == repo_path)?;
-        self.repository_tab_labels().into_iter().nth(index)
+        let suffixes = distinguishing_parent_suffixes(
+            all.iter()
+                .map(|repository| (repository.name.as_str(), repository.path.as_str())),
+        );
+        Some(RepositoryTabLabel {
+            name: all[index].name.clone(),
+            suffix: suffixes.into_iter().nth(index).flatten(),
+        })
     }
 
     /// Un aviso sobre un repositorio dice de cuál es cuando hay más de uno
@@ -86,29 +102,36 @@ impl AppModel {
     // Teclado
     // ------------------------------------------------------------------
 
-    /// `Ctrl+Tab` / `Ctrl+Shift+Tab`: la pestaña de repositorio siguiente o
-    /// anterior, dando la vuelta. Desde Home o Settings, la primera (o la
-    /// última hacia atrás).
+    /// `Ctrl+Tab` / `Ctrl+Shift+Tab`: la pestaña de repositorio visible
+    /// siguiente o anterior, dando la vuelta. Desde Home o Settings, la
+    /// primera (o la última hacia atrás).
     pub fn cycle_repository_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let count = self.open_repositories().len();
+        let visible_ids: Vec<String> = self
+            .visible_repositories()
+            .into_iter()
+            .map(|repository| repository.id.clone())
+            .collect();
+        let count = visible_ids.len();
         if count == 0 {
             return;
         }
-        let current = self
-            .active_repository_index()
-            .filter(|_| !self.show_preferences());
+        let current = (!self.show_preferences()).then(|| {
+            self.active_repository()
+                .and_then(|active| visible_ids.iter().position(|id| id == &active.id))
+        });
+        let current = current.flatten();
         let next = match (current, forward) {
             (Some(index), true) => (index + 1) % count,
             (Some(index), false) => (index + count - 1) % count,
             (None, true) => 0,
             (None, false) => count - 1,
         };
-        self.select_repository_tab(next, cx);
+        self.select_visible_repository_tab(next, cx);
     }
 
-    /// `mod+N`: la pestaña de repositorio N (desde 1); 9 es la última.
+    /// `mod+N`: la pestaña de repositorio visible N (desde 1); 9 es la última.
     pub fn select_repository_tab_number(&mut self, number: u8, cx: &mut Context<Self>) {
-        let count = self.open_repositories().len();
+        let count = self.visible_repositories().len();
         if count == 0 || number == 0 {
             return;
         }
@@ -118,7 +141,7 @@ impl AppModel {
             usize::from(number) - 1
         };
         if index < count {
-            self.select_repository_tab(index, cx);
+            self.select_visible_repository_tab(index, cx);
         }
     }
 
@@ -191,9 +214,10 @@ impl AppModel {
         warnings
     }
 
-    /// Cierra esas pestañas de repositorio. Si alguna tiene un borrador de
-    /// commit o una operación en curso pregunta antes, una sola vez. Se
-    /// resuelve a `true` si se cerraron.
+    /// Cierra esas pestañas de repositorio. Con un workspace activo las quita
+    /// del workspace y solo cierra de `open_repositories` las que no estén en
+    /// ningún otro workspace (pidiendo confirmación únicamente por las que se
+    /// cierran de verdad y tengan aviso). Se resuelve a `true` si se aplicó.
     pub fn request_close_repositories(
         &mut self,
         repo_ids: Vec<String>,
@@ -207,7 +231,21 @@ impl AppModel {
             return Task::ready(false);
         }
 
-        let warnings: Vec<(String, Vec<String>)> = repo_ids
+        let active_workspace_id = self.active_workspace_id().map(str::to_string);
+        let closing_from_open: Vec<String> = repo_ids
+            .iter()
+            .filter(|id| match active_workspace_id.as_deref() {
+                Some(ws_id) => self.repository(id.as_str()).is_some_and(|repo| {
+                    !self
+                        .repositories
+                        .is_repository_in_other_workspace(&repo.path, ws_id)
+                }),
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        let warnings: Vec<(String, Vec<String>)> = closing_from_open
             .iter()
             .filter_map(|id| {
                 let warnings = self.repository_close_warnings(id);
@@ -217,19 +255,19 @@ impl AppModel {
             })
             .collect();
         if warnings.is_empty() {
-            self.close_repositories(&repo_ids, cx);
+            self.close_repositories(&repo_ids, active_workspace_id.as_deref(), cx);
             return Task::ready(true);
         }
 
-        let title = if repo_ids.len() == 1 {
+        let title = if closing_from_open.len() == 1 {
             format!("Close \u{201c}{}\u{201d}?", warnings[0].0)
         } else {
-            format!("Close {} repositories?", repo_ids.len())
+            format!("Close {} repositories?", closing_from_open.len())
         };
         let description = warnings
             .iter()
             .map(|(label, warnings)| {
-                if repo_ids.len() == 1 {
+                if closing_from_open.len() == 1 {
                     warnings.join(" ")
                 } else {
                     format!("{label}: {}", warnings.join(" "))
@@ -250,14 +288,103 @@ impl AppModel {
         flow(cx, async move |this, cx| {
             let confirmed = answer.await;
             if confirmed {
-                this.update(cx, |this, cx| this.close_repositories(&repo_ids, cx));
+                this.update(cx, |this, cx| {
+                    this.close_repositories(&repo_ids, active_workspace_id.as_deref(), cx);
+                });
             }
             confirmed
         })
     }
 
     /// Cierra sin preguntar y recuerda las rutas para poder reabrirlas.
-    fn close_repositories(&mut self, repo_ids: &[String], cx: &mut Context<Self>) {
+    fn close_repositories(
+        &mut self,
+        repo_ids: &[String],
+        active_workspace_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ws_id) = active_workspace_id
+            && self.active_workspace_id() == Some(ws_id)
+        {
+            let previous_id = self.active_repository_id();
+            let visible_ids: Vec<String> = self
+                .visible_repositories()
+                .into_iter()
+                .map(|repository| repository.id.clone())
+                .collect();
+            let next_active_id = if previous_id
+                .as_ref()
+                .is_some_and(|active_id| repo_ids.contains(active_id))
+            {
+                let active_pos = previous_id
+                    .as_ref()
+                    .and_then(|active_id| visible_ids.iter().position(|id| id == active_id));
+                let survivors: Vec<(usize, &String)> = visible_ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| !repo_ids.contains(*id))
+                    .collect();
+                active_pos
+                    .and_then(|active_pos| {
+                        survivors
+                            .iter()
+                            .find(|(index, _)| *index > active_pos)
+                            .or_else(|| survivors.last())
+                            .map(|(_, id)| (*id).clone())
+                    })
+                    .or_else(|| survivors.first().map(|(_, id)| (*id).clone()))
+            } else {
+                previous_id.clone()
+            };
+
+            for id in repo_ids {
+                let Some(path) = self.repository(id.as_str()).map(|repo| repo.path.clone()) else {
+                    continue;
+                };
+                let close_from_open = !self
+                    .repositories
+                    .is_repository_in_other_workspace(&path, ws_id);
+                self.repositories
+                    .remove_repository_from_workspace(&path, ws_id);
+                if close_from_open {
+                    self.shell
+                        .closed_repositories
+                        .retain(|closed| *closed != path);
+                    self.shell.closed_repositories.push(path.clone());
+                    self.shell.refs_fingerprints.remove(&path);
+                    self.shell.visited_repository_ids.remove(id);
+                    if self.repositories.remove_repository(id.as_str()).is_some() {
+                        self.release_http_credentials(&path, cx);
+                        if !self
+                            .repositories
+                            .recent_repositories
+                            .iter()
+                            .any(|recent| recent.path == path)
+                        {
+                            self.summaries.remove(&path);
+                        }
+                    }
+                }
+            }
+
+            let excess = self
+                .shell
+                .closed_repositories
+                .len()
+                .saturating_sub(CLOSED_REPOSITORIES_LIMIT);
+            self.shell.closed_repositories.drain(..excess);
+
+            let next_index = next_active_id
+                .as_deref()
+                .and_then(|id| self.repositories.find_repository_index(id));
+            self.repositories.set_active_repository(next_index);
+            self.persist_workspace_session(cx).detach();
+            self.after_active_repository_change(previous_id, cx);
+            cx.notify();
+            return;
+        }
+
+        // En "All": cierra directamente de `open_repositories`.
         // Si se cierran varias y una es la activa, se salta de una vez a la
         // que quedará (la primera superviviente a su derecha, o la última a
         // su izquierda) en vez de pasar por cada vecina y leerla.
@@ -303,34 +430,36 @@ impl AppModel {
         self.shell.closed_repositories.drain(..excess);
     }
 
-    /// Las demás pestañas de repositorio ("Close others").
+    /// Las demás pestañas de repositorio visibles ("Close others").
     pub fn close_other_repositories(
         &mut self,
         repo_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let others = self
-            .open_repositories()
-            .iter()
+            .visible_repositories()
+            .into_iter()
             .filter(|repository| repository.id != repo_id)
             .map(|repository| repository.id.clone())
             .collect();
         self.request_close_repositories(others, cx)
     }
 
-    /// Las pestañas a la derecha de esta ("Close to the right").
+    /// Las pestañas visibles a la derecha de esta ("Close to the right").
     pub fn close_repositories_to_the_right(
         &mut self,
         repo_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let Some(index) = self.find_repository_index(repo_id) else {
-            return Task::ready(false);
-        };
-        let right = self.open_repositories()[index + 1..]
-            .iter()
+        let visible: Vec<String> = self
+            .visible_repositories()
+            .into_iter()
             .map(|repository| repository.id.clone())
             .collect();
+        let Some(index) = visible.iter().position(|id| id == repo_id) else {
+            return Task::ready(false);
+        };
+        let right = visible[index + 1..].to_vec();
         self.request_close_repositories(right, cx)
     }
 
@@ -362,9 +491,15 @@ impl AppModel {
         Task::ready(false)
     }
 
-    /// Mueve una pestaña de repositorio (arrastrar y soltar).
+    /// Mueve una pestaña de repositorio visible (arrastrar y soltar). En "All"
+    /// reordena `open_repositories`; con un workspace activo, reordena dentro
+    /// de ese workspace.
     pub fn move_repository_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        if self.repositories.move_repository(from, to).is_some() {
+        if self
+            .repositories
+            .move_visible_repository(from, to)
+            .is_some()
+        {
             self.persist_workspace_session(cx).detach();
             cx.notify();
         }

@@ -535,3 +535,59 @@ async fn the_home_repaints_only_for_what_it_shows_and_not_while_hidden(cx: &mut 
     app.settle(cx);
     assert!(renders(&home, cx) > shown);
 }
+
+#[gpui_kit::test]
+async fn home_shows_workspaces_progressively_and_allows_creating_and_switching(
+    cx: &mut TestAppContext,
+) {
+    let (app, _workspace, open, _recent, _home) = dashboard(cx);
+
+    // Sin workspaces: el inicio permanece limpio, solo ofrece el botón discreto de crear.
+    assert!(!app.exists(cx, "home-workspace-all"));
+    assert!(app.exists(cx, "home-new-workspace"));
+
+    app.host.answer_prompt("Core");
+    app.click(cx, "home-new-workspace");
+    app.wait_for(cx, "workspace created", |cx| {
+        app.model
+            .read_with(cx, |model, _| model.workspaces().len() == 1)
+    });
+    app.settle(cx);
+
+    let ws_id = app
+        .model
+        .read_with(cx, |model, _| model.workspaces()[0].id.clone());
+    assert!(app.exists(cx, "home-workspace-all"));
+    assert!(app.exists(cx, format!("home-workspace:{ws_id}")));
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model
+            .active_workspace_id()
+            .map(str::to_string)),
+        Some(ws_id.clone())
+    );
+
+    // Cambiar a "All" desde Home desactiva el filtro de workspace.
+    app.click(cx, "home-workspace-all");
+    app.settle(cx);
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model
+            .active_workspace_id()
+            .map(str::to_string)),
+        None
+    );
+
+    // Añadir un repo al workspace y seleccionarlo desde Home activa el repo.
+    app.model.update(cx, |model, cx| {
+        model.add_repository_to_workspace(&open, &ws_id, cx);
+    });
+    app.settle(cx);
+    app.click(cx, format!("home-workspace:{ws_id}"));
+    app.settle(cx);
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(model.active_workspace_id(), Some(ws_id.as_str()));
+        assert_eq!(
+            model.active_repository().map(|repo| repo.path.as_str()),
+            Some(open.as_str())
+        );
+    });
+}

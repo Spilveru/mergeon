@@ -84,6 +84,10 @@ pub enum PaletteAction {
     PullRequest {
         number: u64,
     },
+    /// "Switch workspace…": cambia al grupo elegido (`None` = "All").
+    SelectWorkspace {
+        id: Option<String>,
+    },
 }
 
 /// Qué hace un archivo elegido en la paleta.

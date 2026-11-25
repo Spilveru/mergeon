@@ -248,6 +248,55 @@ fn check_workspace_session(path: &str, value: &mut Value, errors: &mut Vec<Strin
             errors,
         );
     }
+
+    if let Some(groups) = value.get("workspaces") {
+        let groups_path = child_path(path, "workspaces");
+        if check_type(&groups_path, groups, &[Array], errors) {
+            for (index, item) in groups.as_array().into_iter().flatten().enumerate() {
+                let item_path = child_path(&groups_path, &index.to_string());
+                if !check_type(&item_path, item, &[Object], errors) {
+                    continue;
+                }
+                if let Some(id) = item.get("id") {
+                    check_type(&child_path(&item_path, "id"), id, &[Str], errors);
+                }
+                if let Some(name) = item.get("name") {
+                    check_type(&child_path(&item_path, "name"), name, &[Str], errors);
+                }
+                if let Some(repos) = item.get("repositories") {
+                    let repos_path = child_path(&item_path, "repositories");
+                    if check_type(&repos_path, repos, &[Array], errors) {
+                        for (repo_index, repo) in repos.as_array().into_iter().flatten().enumerate()
+                        {
+                            check_type(
+                                &child_path(&repos_path, &repo_index.to_string()),
+                                repo,
+                                &[Str],
+                                errors,
+                            );
+                        }
+                    }
+                }
+                if let Some(active_repo) = item.get("activeRepositoryPath") {
+                    check_type(
+                        &child_path(&item_path, "activeRepositoryPath"),
+                        active_repo,
+                        &[Str, Null],
+                        errors,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(active_workspace) = value.get("activeWorkspaceId") {
+        check_type(
+            &child_path(path, "activeWorkspaceId"),
+            active_workspace,
+            &[Str, Null],
+            errors,
+        );
+    }
 }
 
 /// Valida el valor de una clave del esquema (aplicando los defaults anidados)
@@ -485,6 +534,60 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Config schema violation: `settings` must be object; `starredBranches` must be object"
+        );
+    }
+
+    #[test]
+    fn validates_optional_repo_workspaces_inside_workspace_session() {
+        assert!(
+            validate_config(&json!({
+                "workspaceSession": {
+                    "openRepositories": ["/a"],
+                    "activeRepositoryPath": "/a",
+                    "repositoryWorkspaces": {},
+                    "workspaces": [
+                        {
+                            "id": "ws-work",
+                            "name": "Work",
+                            "repositories": ["/a"],
+                            "activeRepositoryPath": "/a"
+                        },
+                        {
+                            "id": "ws-empty",
+                            "name": "Empty",
+                            "repositories": [],
+                            "activeRepositoryPath": null
+                        }
+                    ],
+                    "activeWorkspaceId": "ws-work"
+                }
+            }))
+            .is_ok()
+        );
+
+        assert_eq!(
+            errors_of(json!({
+                "workspaceSession": {
+                    "workspaces": [
+                        {
+                            "id": 1,
+                            "name": null,
+                            "repositories": ["/a", 42],
+                            "activeRepositoryPath": false
+                        },
+                        "bad"
+                    ],
+                    "activeWorkspaceId": 99
+                }
+            })),
+            vec![
+                "`workspaceSession/workspaces/0/id` must be string",
+                "`workspaceSession/workspaces/0/name` must be string",
+                "`workspaceSession/workspaces/0/repositories/1` must be string",
+                "`workspaceSession/workspaces/0/activeRepositoryPath` must be string,null",
+                "`workspaceSession/workspaces/1` must be object",
+                "`workspaceSession/activeWorkspaceId` must be string,null",
+            ]
         );
     }
 }

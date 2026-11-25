@@ -154,6 +154,24 @@ pub struct RecentRepository {
     pub extra: Map<String, Value>,
 }
 
+/// Un grupo nombrado de repositorios dentro de `workspaceSession.workspaces`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoWorkspace {
+    #[serde(default, deserialize_with = "lenient")]
+    pub id: String,
+    #[serde(default, deserialize_with = "lenient")]
+    pub name: String,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub repositories: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_repository_path: Option<String>,
+}
+
 /// Qué repositorios estaban abiertos y cuál estaba activo (`workspaceSession`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +184,20 @@ pub struct WorkspaceSession {
     pub open_repositories: Vec<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub active_repository_path: Option<String>,
+    /// Grupos nombrados de repositorios. Se omiten si no hay ninguno.
+    #[serde(
+        default,
+        deserialize_with = "lenient_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub workspaces: Vec<RepoWorkspace>,
+    /// Grupo activo (`None` = "All"). Se omite si es `None`.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_workspace_id: Option<String>,
 }
 
 #[cfg(test)]

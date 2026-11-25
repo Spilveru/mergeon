@@ -148,6 +148,17 @@ pub(crate) fn session_to_store(session: &WorkspaceSession) -> mergeon_store::Wor
             .collect(),
         open_repositories: session.open_repositories.clone(),
         active_repository_path: session.active_repository_path.clone(),
+        workspaces: session
+            .workspaces
+            .iter()
+            .map(|workspace| mergeon_store::RepoWorkspace {
+                id: workspace.id.clone(),
+                name: workspace.name.clone(),
+                repositories: workspace.repositories.clone(),
+                active_repository_path: workspace.active_repository_path.clone(),
+            })
+            .collect(),
+        active_workspace_id: session.active_workspace_id.clone(),
     }
 }
 

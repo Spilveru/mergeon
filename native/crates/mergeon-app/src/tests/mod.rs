@@ -22,6 +22,7 @@ mod github_store;
 mod history;
 mod notifications;
 mod pull_requests;
+mod repo_workspaces;
 mod repositories_store;
 mod repository_sync;
 mod settings;

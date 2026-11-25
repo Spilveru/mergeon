@@ -17,6 +17,7 @@ use mergeon_app::AppModel;
 use mergeon_app::backend::RepositorySummary;
 use mergeon_app::model_types::dialogs::ConfirmOptions;
 use mergeon_app::model_types::format::format_date_time;
+use mergeon_ui::menu::{MenuItem, MenuTriggerExt as _};
 use mergeon_ui::theme::with_alpha;
 use mergeon_ui::{
     ActivePaletteExt as _, AlertVariant, AppIcon, BadgeVariant, IconTone, Lucide,
@@ -123,6 +124,8 @@ type WatchKey = (Option<String>, Vec<String>, Vec<String>, Vec<String>);
 struct HomeShown {
     entries: Vec<RepositoryEntry>,
     open_paths: Vec<String>,
+    workspaces: Vec<(String, String, usize)>,
+    active_workspace_id: Option<String>,
     has_recent: bool,
     has_github_accounts: bool,
     /// Usuario, "requiere reconectar", "requiere instalar la app" y si hay
@@ -143,6 +146,18 @@ impl HomeShown {
                 .iter()
                 .map(|repo| repo.path.clone())
                 .collect(),
+            workspaces: model
+                .workspaces()
+                .iter()
+                .map(|workspace| {
+                    (
+                        workspace.id.clone(),
+                        workspace.name.clone(),
+                        workspace.repositories.len(),
+                    )
+                })
+                .collect(),
+            active_workspace_id: model.active_workspace_id().map(str::to_string),
             has_recent: !model.recent_repositories().is_empty(),
             has_github_accounts: model.has_github_accounts(),
             github_account: model.active_github_account().map(|account| {
@@ -638,11 +653,169 @@ impl HomeView {
             .text_color(cx.palette().foreground)
     }
 
+    fn handle_create_workspace(&mut self, cx: &mut Context<Self>) {
+        self.model
+            .update(cx, |model, cx| {
+                model.prompt_create_workspace(Vec::new(), cx)
+            })
+            .detach();
+    }
+
+    fn handle_select_workspace(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.model
+            .update(cx, |model, cx| model.select_workspace(id, cx))
+            .detach();
+    }
+
+    fn render_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+        if self.shown.workspaces.is_empty() {
+            return None;
+        }
+        let palette = *cx.palette();
+        let active_id = self.shown.active_workspace_id.as_deref();
+        let total_open = self.shown.open_paths.len();
+        let workspaces = self.shown.workspaces.clone();
+        let model = self.model.clone();
+
+        let workspace_row = |id: SharedString,
+                             icon: Lucide,
+                             name: String,
+                             count: usize,
+                             selected: bool,
+                             window: &mut Window,
+                             cx: &mut App| {
+            Self::tree_row(id, window, cx)
+                .justify_between()
+                .selected(selected)
+                .map(|this| {
+                    if selected {
+                        this.bg(palette.sidebar_row_selected)
+                            .font_weight(FontWeight::MEDIUM)
+                    } else {
+                        this.hover(|style| style.bg(palette.sidebar_row_hover))
+                    }
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(rems(0.38))
+                        .min_w_0()
+                        .child(mergeon_ui::icon(icon).size(px(13.)).tone(if selected {
+                            IconTone::Active
+                        } else {
+                            IconTone::Muted
+                        }))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(rems(0.8125))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(SharedString::from(name)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(rems(0.75))
+                        .text_color(palette.muted_foreground)
+                        .child(SharedString::from(count.to_string())),
+                )
+        };
+
+        let all_row = workspace_row(
+            "home-workspace-all".into(),
+            Lucide::Folders,
+            "All".to_string(),
+            total_open,
+            active_id.is_none(),
+            window,
+            cx,
+        )
+        .accessibility_label("Workspace All")
+        .on_click(cx.listener(|this, _, _, cx| this.handle_select_workspace(None, cx)));
+
+        Some(
+            div()
+                .mb(rems(0.75))
+                .pb(rems(0.6))
+                .border_b_1()
+                .border_color(palette.border)
+                .child(
+                    Self::group_header("Workspaces", cx).child(
+                        mergeon_ui::button("home-new-workspace")
+                            .ghost()
+                            .xs()
+                            .icon(Lucide::Plus)
+                            .tooltip("New workspace…")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.handle_create_workspace(cx);
+                            })),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(0.075))
+                        .child(all_row)
+                        .children(workspaces.into_iter().map(|(ws_id, ws_name, repo_count)| {
+                            let selected = active_id == Some(ws_id.as_str());
+                            let select_id = ws_id.clone();
+                            let menu_id = ws_id.clone();
+                            let menu_model = model.clone();
+                            workspace_row(
+                                SharedString::from(format!("home-workspace:{ws_id}")),
+                                Lucide::Folder,
+                                ws_name.clone(),
+                                repo_count,
+                                selected,
+                                window,
+                                cx,
+                            )
+                            .accessibility_label(format!("Workspace {ws_name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.handle_select_workspace(Some(select_id.clone()), cx);
+                            }))
+                            .context_menu_items(move |_, _| {
+                                let rename_model = menu_model.clone();
+                                let rename_id = menu_id.clone();
+                                let delete_model = menu_model.clone();
+                                let delete_id = menu_id.clone();
+                                vec![
+                                    MenuItem::new("Rename workspace…")
+                                        .icon(Lucide::Pencil)
+                                        .on_click(move |_, cx| {
+                                            rename_model.update(cx, |model, cx| {
+                                                model
+                                                    .prompt_rename_workspace(&rename_id, cx)
+                                                    .detach();
+                                            });
+                                        }),
+                                    MenuItem::new("Delete workspace")
+                                        .icon(Lucide::Trash)
+                                        .danger()
+                                        .on_click(move |_, cx| {
+                                            delete_model.update(cx, |model, cx| {
+                                                model
+                                                    .confirm_delete_workspace(&delete_id, cx)
+                                                    .detach();
+                                            });
+                                        }),
+                                ]
+                            })
+                        })),
+                )
+                .text_color(palette.foreground),
+        )
+    }
+
     fn render_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let palette = *cx.palette();
         let groups = repository_groups(&self.shown.entries);
         let open_paths: HashSet<String> = self.shown.open_paths.iter().cloned().collect();
         let has_recent = self.shown.has_recent;
+        let has_workspaces = !self.shown.workspaces.is_empty();
 
         let tree = if groups.is_empty() {
             Self::sidebar_note("No repositories available", cx).into_any_element()
@@ -705,7 +878,20 @@ impl HomeView {
         };
 
         div()
-            .child(Self::group_header("Repositories", cx))
+            .child(
+                Self::group_header("Repositories", cx).when(!has_workspaces, |header| {
+                    header.child(
+                        mergeon_ui::button("home-new-workspace")
+                            .ghost()
+                            .xs()
+                            .icon(Lucide::Folders)
+                            .tooltip("New workspace…")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.handle_create_workspace(cx);
+                            })),
+                    )
+                }),
+            )
             .child(tree)
             .when(has_recent, |this| {
                 this.child(
@@ -1248,6 +1434,7 @@ impl Render for HomeView {
             px(260.)
         };
 
+        let workspaces = self.render_workspaces(window, cx);
         let repositories = self.render_repositories(window, cx);
         let github = self.render_github(cx);
         let main = self.render_main(window, cx);
@@ -1286,6 +1473,7 @@ impl Render for HomeView {
                             .track_scroll(&self.tree_scroll)
                             .px(px(12.))
                             .py(rems(0.5))
+                            .children(workspaces)
                             .child(repositories),
                     )
                     .vertical_scrollbar(&self.tree_scroll),
