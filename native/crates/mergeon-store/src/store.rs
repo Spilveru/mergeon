@@ -26,7 +26,7 @@ use crate::settings::{
     Settings, SettingsUpdate, merge_settings_update, normalize_settings, recent_repositories_limit,
 };
 use crate::time::iso_now;
-use crate::types::{GitHubAccount, RecentRepository, WorkspaceSession};
+use crate::types::{GitHubAccount, RecentRepository, RepoWorkspace, WorkspaceSession};
 
 type State = Map<String, Value>;
 
@@ -872,6 +872,40 @@ impl Store {
         &self,
         session: &WorkspaceSession,
     ) -> Result<WorkspaceSession, StoreError> {
+        let mut workspaces: Vec<RepoWorkspace> = Vec::new();
+        for workspace in &session.workspaces {
+            let id = workspace.id.trim();
+            let name = workspace.name.trim();
+            if is_blank(id) || is_blank(name) {
+                continue;
+            }
+            if workspaces.iter().any(|existing| existing.id == id) {
+                continue;
+            }
+            let mut repositories = Vec::new();
+            for path in &workspace.repositories {
+                if !is_blank(path) && !repositories.contains(path) {
+                    repositories.push(path.clone());
+                }
+            }
+            let active_repository_path = workspace
+                .active_repository_path
+                .clone()
+                .filter(|path| !is_blank(path) && repositories.contains(path));
+            workspaces.push(RepoWorkspace {
+                id: id.to_string(),
+                name: name.to_string(),
+                repositories,
+                active_repository_path,
+            });
+        }
+        let active_workspace_id = session
+            .active_workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !is_blank(id) && workspaces.iter().any(|ws| ws.id == *id))
+            .map(str::to_string);
+
         let normalized = WorkspaceSession {
             repository_workspaces: session.repository_workspaces.clone(),
             open_repositories: session
@@ -884,6 +918,8 @@ impl Store {
                 .active_repository_path
                 .clone()
                 .filter(|path| !is_blank(path)),
+            workspaces,
+            active_workspace_id,
         };
         let value = Value::Object(to_object(&normalized)?);
 

@@ -176,6 +176,22 @@ pub fn create_empty_sidebar_loaded_state() -> SidebarFlags {
     SidebarFlags::default()
 }
 
+/// Un grupo nombrado de repositorios (workspace), para filtrar las pestañas
+/// de la barra de título. Distinto de [`RepositoryWorkspace`], que guarda las
+/// pestañas de archivos dentro de un único repositorio.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoWorkspace {
+    pub id: String,
+    pub name: String,
+    /// Rutas normalizadas de los repositorios de este grupo, en su orden.
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    /// Último repositorio activo dentro de este grupo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_repository_path: Option<String>,
+}
+
 /// Lo que se guarda para reabrir la app como estaba.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +200,13 @@ pub struct WorkspaceSession {
     pub active_repository_path: Option<String>,
     /// Pestañas de cada repositorio, por ruta.
     pub repository_workspaces: BTreeMap<String, RepositoryWorkspace>,
+    /// Grupos nombrados de repositorios. Se omiten si está vacío para
+    /// conservar el JSON idéntico a sesiones anteriores.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<RepoWorkspace>,
+    /// Grupo activo (`None` = "All", muestra todos los repositorios abiertos).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for WorkspaceSession {
@@ -201,8 +224,76 @@ fn non_blank(value: &Value) -> Option<&str> {
     value.as_str().filter(|path| !js_trim(path).is_empty())
 }
 
+fn normalize_repo_workspace(value: &Value) -> Option<RepoWorkspace> {
+    let object = value.as_object()?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(js_trim)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(js_trim)
+        .filter(|name| !name.is_empty())?
+        .to_string();
+
+    let mut repositories: Vec<String> = Vec::new();
+    for item in object
+        .get("repositories")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(raw) = item.as_str() else {
+            continue;
+        };
+        let normalized = normalize_repository_path(raw);
+        if !normalized.is_empty() && !repositories.contains(&normalized) {
+            repositories.push(normalized);
+        }
+    }
+
+    let active_repository_path = object
+        .get("activeRepositoryPath")
+        .and_then(Value::as_str)
+        .map(normalize_repository_path)
+        .filter(|path| !path.is_empty() && repositories.contains(path));
+
+    Some(RepoWorkspace {
+        id,
+        name,
+        repositories,
+        active_repository_path,
+    })
+}
+
 /// Deja una sesión guardada (posiblemente vieja o corrupta) en una forma válida.
 pub fn normalize_workspace_session(session: &Value) -> WorkspaceSession {
+    let mut workspaces: Vec<RepoWorkspace> = Vec::new();
+    for item in session
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(workspace) = normalize_repo_workspace(item)
+            && !workspaces
+                .iter()
+                .any(|existing| existing.id == workspace.id)
+        {
+            workspaces.push(workspace);
+        }
+    }
+
+    let active_workspace_id = session
+        .get("activeWorkspaceId")
+        .and_then(Value::as_str)
+        .map(js_trim)
+        .filter(|id| !id.is_empty() && workspaces.iter().any(|ws| ws.id == *id))
+        .map(str::to_string);
+
     WorkspaceSession {
         open_repositories: session
             .get("openRepositories")
@@ -223,6 +314,8 @@ pub fn normalize_workspace_session(session: &Value) -> WorkspaceSession {
             .flatten()
             .map(|(path, state)| (path.clone(), normalize_repository_workspace(state)))
             .collect(),
+        workspaces,
+        active_workspace_id,
     }
 }
 
@@ -808,6 +901,9 @@ pub struct AddRepositoryOptions<'a> {
     /// Ruta canónica (symlinks resueltos); manda sobre la que se pidió.
     pub canonical_path: Option<&'a str>,
     pub skip_recent_repository_update: bool,
+    /// No añadir el repositorio al workspace activo (al restaurar la sesión o
+    /// al abrir los repositorios propios de un workspace al cambiar a él).
+    pub skip_active_workspace_assignment: bool,
 }
 
 /// Resultado de abrir un repositorio, con lo que queda por persistir.
@@ -1010,6 +1106,32 @@ impl<Stash, Submodule> RepositoriesStore<Stash, Submodule> {
 
     /// Recalcula la sesión a partir de lo abierto y la devuelve para guardarla.
     pub fn persist_workspace_session(&mut self) -> WorkspaceSession {
+        let active_repository_path = self
+            .active_repository()
+            .map(|repository| repository.path.clone())
+            .filter(|path| !js_trim(path).is_empty());
+
+        let mut workspaces = std::mem::take(&mut self.workspace_session.workspaces);
+        let active_workspace_id = self
+            .workspace_session
+            .active_workspace_id
+            .take()
+            .filter(|id| workspaces.iter().any(|ws| ws.id == *id));
+
+        // Si hay un workspace activo y el repositorio activo le pertenece, se
+        // recuerda como el último activo de ese workspace.
+        if let (Some(active_ws_id), Some(active_path)) = (
+            active_workspace_id.as_deref(),
+            active_repository_path.as_deref(),
+        ) && let Some(workspace) = workspaces.iter_mut().find(|ws| ws.id == active_ws_id)
+            && workspace
+                .repositories
+                .iter()
+                .any(|path| path == active_path)
+        {
+            workspace.active_repository_path = Some(active_path.to_string());
+        }
+
         let session = WorkspaceSession {
             repository_workspaces: std::mem::take(
                 &mut self.workspace_session.repository_workspaces,
@@ -1020,14 +1142,325 @@ impl<Stash, Submodule> RepositoriesStore<Stash, Submodule> {
                 .map(|repository| repository.path.clone())
                 .filter(|path| !js_trim(path).is_empty())
                 .collect(),
-            active_repository_path: self
-                .active_repository()
-                .map(|repository| repository.path.clone())
-                .filter(|path| !js_trim(path).is_empty()),
+            active_repository_path,
+            workspaces,
+            active_workspace_id,
         };
 
         self.workspace_session = session.clone();
         session
+    }
+
+    // ------------------------------------------------------------------
+    // Workspaces (grupos de repositorios)
+    // ------------------------------------------------------------------
+
+    pub fn workspaces(&self) -> &[RepoWorkspace] {
+        &self.workspace_session.workspaces
+    }
+
+    pub fn active_workspace_id(&self) -> Option<&str> {
+        self.workspace_session.active_workspace_id.as_deref()
+    }
+
+    pub fn active_workspace(&self) -> Option<&RepoWorkspace> {
+        let id = self.active_workspace_id()?;
+        self.workspace(id)
+    }
+
+    pub fn workspace(&self, id: &str) -> Option<&RepoWorkspace> {
+        self.workspace_session
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == id)
+    }
+
+    /// Repositorios abiertos visibles en la barra de pestañas: los del
+    /// workspace activo en su orden, o todos los abiertos cuando está activo
+    /// "All" (`None`).
+    pub fn visible_repositories(&self) -> Vec<&Repository<Stash, Submodule>> {
+        let Some(workspace) = self.active_workspace() else {
+            return self.repositories.iter().collect();
+        };
+        workspace
+            .repositories
+            .iter()
+            .filter_map(|path| {
+                self.repositories
+                    .iter()
+                    .find(|repository| normalize_repository_path(&repository.path) == *path)
+            })
+            .collect()
+    }
+
+    pub fn is_repository_in_workspace(&self, repo_path: &str, workspace_id: &str) -> bool {
+        let normalized = normalize_repository_path(repo_path);
+        self.workspace(workspace_id)
+            .is_some_and(|workspace| workspace.repositories.contains(&normalized))
+    }
+
+    pub fn is_repository_in_other_workspace(
+        &self,
+        repo_path: &str,
+        exclude_workspace_id: &str,
+    ) -> bool {
+        let normalized = normalize_repository_path(repo_path);
+        self.workspace_session.workspaces.iter().any(|workspace| {
+            workspace.id != exclude_workspace_id && workspace.repositories.contains(&normalized)
+        })
+    }
+
+    fn next_workspace_id(&self, name: &str) -> String {
+        let mut slug = String::new();
+        let mut prev_dash = false;
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                slug.push(ch.to_ascii_lowercase());
+                prev_dash = false;
+            } else if !slug.is_empty() && !prev_dash {
+                slug.push('-');
+                prev_dash = true;
+            }
+        }
+        let slug = slug.trim_end_matches('-');
+        let base = if slug.is_empty() {
+            "ws".to_string()
+        } else {
+            format!("ws-{slug}")
+        };
+        if !self
+            .workspace_session
+            .workspaces
+            .iter()
+            .any(|ws| ws.id == base)
+        {
+            return base;
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{base}-{suffix}");
+            if !self
+                .workspace_session
+                .workspaces
+                .iter()
+                .any(|ws| ws.id == candidate)
+            {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    /// Crea un grupo nuevo. Devuelve `None` si el nombre queda vacío.
+    pub fn create_workspace(
+        &mut self,
+        name: &str,
+        initial_repos: &[String],
+    ) -> Option<(RepoWorkspace, WorkspaceSession)> {
+        let name = js_trim(name);
+        if name.is_empty() {
+            return None;
+        }
+        let id = self.next_workspace_id(name);
+        let mut repositories = Vec::new();
+        for path in initial_repos {
+            let normalized = normalize_repository_path(path);
+            if !normalized.is_empty() && !repositories.contains(&normalized) {
+                repositories.push(normalized);
+            }
+        }
+        let active_repository_path = self
+            .active_repository()
+            .map(|repo| normalize_repository_path(&repo.path))
+            .filter(|path| repositories.contains(path))
+            .or_else(|| repositories.first().cloned());
+
+        let workspace = RepoWorkspace {
+            id,
+            name: name.to_string(),
+            repositories,
+            active_repository_path,
+        };
+        self.workspace_session.workspaces.push(workspace.clone());
+        let session = self.persist_workspace_session();
+        Some((workspace, session))
+    }
+
+    /// Renombra un grupo existente. Devuelve `None` si el nombre queda vacío,
+    /// el grupo no existe o el nombre no cambia.
+    pub fn rename_workspace(&mut self, id: &str, name: &str) -> Option<WorkspaceSession> {
+        let name = js_trim(name);
+        if name.is_empty() {
+            return None;
+        }
+        let workspace = self
+            .workspace_session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == id)?;
+        if workspace.name == name {
+            return None;
+        }
+        workspace.name = name.to_string();
+        Some(self.persist_workspace_session())
+    }
+
+    /// Borra un grupo sin cerrar sus repositorios. Si era el activo, pasa a
+    /// "All" (`None`).
+    pub fn delete_workspace(&mut self, id: &str) -> Option<WorkspaceSession> {
+        let index = self
+            .workspace_session
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == id)?;
+        self.workspace_session.workspaces.remove(index);
+        if self.workspace_session.active_workspace_id.as_deref() == Some(id) {
+            self.workspace_session.active_workspace_id = None;
+        }
+        Some(self.persist_workspace_session())
+    }
+
+    /// Cambia el grupo activo (`None` = "All"). Devuelve `None` si el id no
+    /// corresponde a ningún grupo.
+    pub fn set_active_workspace(&mut self, id: Option<&str>) -> Option<WorkspaceSession> {
+        if let Some(id) = id
+            && !self
+                .workspace_session
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == id)
+        {
+            return None;
+        }
+        self.workspace_session.active_workspace_id = id.map(str::to_string);
+        Some(self.persist_workspace_session())
+    }
+
+    /// Añade un repositorio a un grupo. Devuelve `None` si la ruta está vacía,
+    /// el grupo no existe o ya estaba incluido.
+    pub fn add_repository_to_workspace(
+        &mut self,
+        repo_path: &str,
+        workspace_id: &str,
+    ) -> Option<WorkspaceSession> {
+        let normalized = normalize_repository_path(repo_path);
+        if normalized.is_empty() {
+            return None;
+        }
+        let workspace = self
+            .workspace_session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)?;
+        if workspace.repositories.contains(&normalized) {
+            return None;
+        }
+        workspace.repositories.push(normalized.clone());
+        if workspace.active_repository_path.is_none() {
+            workspace.active_repository_path = Some(normalized);
+        }
+        Some(self.persist_workspace_session())
+    }
+
+    /// Quita un repositorio de un grupo sin cerrarlo de `repositories`.
+    pub fn remove_repository_from_workspace(
+        &mut self,
+        repo_path: &str,
+        workspace_id: &str,
+    ) -> Option<WorkspaceSession> {
+        let normalized = normalize_repository_path(repo_path);
+        let workspace = self
+            .workspace_session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)?;
+        let index = workspace
+            .repositories
+            .iter()
+            .position(|path| *path == normalized)?;
+        workspace.repositories.remove(index);
+        if workspace.active_repository_path.as_deref() == Some(normalized.as_str()) {
+            workspace.active_repository_path = workspace
+                .repositories
+                .get(index)
+                .or_else(|| workspace.repositories.last())
+                .cloned();
+        }
+        Some(self.persist_workspace_session())
+    }
+
+    /// Actualiza una ruta guardada en un grupo (p. ej. tras resolver un
+    /// symlink al abrirlo) manteniendo su posición.
+    pub fn replace_workspace_repository_path(
+        &mut self,
+        workspace_id: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> bool {
+        let old_normalized = normalize_repository_path(old_path);
+        let new_normalized = normalize_repository_path(new_path);
+        if old_normalized == new_normalized || new_normalized.is_empty() {
+            return false;
+        }
+        let Some(workspace) = self
+            .workspace_session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return false;
+        };
+        let Some(index) = workspace
+            .repositories
+            .iter()
+            .position(|path| *path == old_normalized)
+        else {
+            return false;
+        };
+        if workspace.repositories.contains(&new_normalized) {
+            workspace.repositories.remove(index);
+        } else {
+            workspace.repositories[index] = new_normalized.clone();
+        }
+        if workspace.active_repository_path.as_deref() == Some(old_normalized.as_str()) {
+            workspace.active_repository_path = Some(new_normalized);
+        }
+        true
+    }
+
+    /// Mueve una pestaña en la lista visible: en "All" reordena
+    /// `repositories`; con un workspace activo, reordena dentro de ese
+    /// workspace.
+    pub fn move_visible_repository(&mut self, from: usize, to: usize) -> Option<WorkspaceSession> {
+        let Some(active_ws_id) = self.workspace_session.active_workspace_id.clone() else {
+            return self.move_repository(from, to);
+        };
+        let visible_paths: Vec<String> = self
+            .visible_repositories()
+            .into_iter()
+            .map(|repo| normalize_repository_path(&repo.path))
+            .collect();
+        if from >= visible_paths.len() || to >= visible_paths.len() || from == to {
+            return None;
+        }
+        let from_path = &visible_paths[from];
+        let to_path = &visible_paths[to];
+        let workspace = self
+            .workspace_session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == active_ws_id)?;
+        let ws_from = workspace
+            .repositories
+            .iter()
+            .position(|path| path == from_path)?;
+        let ws_to = workspace
+            .repositories
+            .iter()
+            .position(|path| path == to_path)?;
+        let moved = workspace.repositories.remove(ws_from);
+        workspace.repositories.insert(ws_to, moved);
+        Some(self.persist_workspace_session())
     }
 
     fn recent_entry(
@@ -1077,6 +1510,22 @@ impl<Stash, Submodule> RepositoriesStore<Stash, Submodule> {
             }
         };
         self.active_repository_index = Some(index);
+
+        // Si hay un workspace activo y no se indicó saltarlo (restauración de
+        // sesión o carga interna), añadir el repositorio automáticamente.
+        if !options.skip_active_workspace_assignment
+            && let Some(active_ws_id) = self.workspace_session.active_workspace_id.clone()
+            && let Some(workspace) = self
+                .workspace_session
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == active_ws_id)
+        {
+            if !workspace.repositories.contains(&normalized_path) {
+                workspace.repositories.push(normalized_path.clone());
+            }
+            workspace.active_repository_path = Some(normalized_path);
+        }
 
         // Agregar a repositorios recientes
         let recent_repository = (!options.skip_recent_repository_update)
@@ -1728,6 +2177,8 @@ mod tests {
             repository_workspaces: BTreeMap::new(),
             open_repositories: open.iter().map(|path| (*path).to_string()).collect(),
             active_repository_path: active.map(str::to_string),
+            workspaces: Vec::new(),
+            active_workspace_id: None,
         }
     }
 
@@ -2310,5 +2761,148 @@ mod tests {
         assert_eq!(log.entries.len(), 1);
         assert_eq!(log.entries[0].repo_name, None);
         assert_eq!(log.unseen_errors, 1);
+    }
+
+    #[test]
+    fn manages_repo_workspaces_visibility_ordering_and_persistence() {
+        let mut store = Store::new();
+        store.add_repository("/tmp/a", AddRepositoryOptions::default());
+        store.add_repository("/tmp/b", AddRepositoryOptions::default());
+        store.add_repository("/tmp/c", AddRepositoryOptions::default());
+
+        // Sin workspaces activos, visible_repositories devuelve todos.
+        assert_eq!(store.visible_repositories().len(), 3);
+        assert!(store.create_workspace("   ", &[]).is_none());
+
+        let (ws1, session) = store
+            .create_workspace(
+                "  Work  ",
+                &["/tmp/c/".into(), "/tmp/a".into(), "/tmp/c".into()],
+            )
+            .expect("workspace");
+        assert_eq!(ws1.name, "Work");
+        assert_eq!(ws1.id, "ws-work");
+        assert_eq!(ws1.repositories, ["/tmp/c", "/tmp/a"]);
+        assert_eq!(ws1.active_repository_path.as_deref(), Some("/tmp/c"));
+        assert_eq!(session.workspaces.len(), 1);
+
+        // Nombres duplicados producen ids únicos.
+        let (ws2, _) = store
+            .create_workspace("Work", &["/tmp/b".into()])
+            .expect("second workspace");
+        assert_eq!(ws2.id, "ws-work-2");
+
+        // Activar ws1 filtra y ordena según el workspace.
+        store.set_active_workspace(Some(&ws1.id)).expect("activate");
+        let visible_paths: Vec<&str> = store
+            .visible_repositories()
+            .into_iter()
+            .map(|repo| repo.path.as_str())
+            .collect();
+        assert_eq!(visible_paths, ["/tmp/c", "/tmp/a"]);
+
+        // Reordenar dentro del workspace activo no cambia el orden global.
+        store.move_visible_repository(0, 1).expect("reorder");
+        let visible_paths: Vec<&str> = store
+            .visible_repositories()
+            .into_iter()
+            .map(|repo| repo.path.as_str())
+            .collect();
+        assert_eq!(visible_paths, ["/tmp/a", "/tmp/c"]);
+        let global_paths: Vec<&str> = store
+            .repositories
+            .iter()
+            .map(|repo| repo.path.as_str())
+            .collect();
+        assert_eq!(global_paths, ["/tmp/a", "/tmp/b", "/tmp/c"]);
+
+        // Abrir un repositorio nuevo con workspace activo lo añade automáticamente.
+        store.add_repository("/tmp/d", AddRepositoryOptions::default());
+        assert_eq!(
+            store.workspace(&ws1.id).unwrap().repositories,
+            ["/tmp/a", "/tmp/c", "/tmp/d"]
+        );
+        assert_eq!(
+            store
+                .workspace(&ws1.id)
+                .unwrap()
+                .active_repository_path
+                .as_deref(),
+            Some("/tmp/d")
+        );
+
+        // Con skip_active_workspace_assignment no se añade al workspace activo.
+        store.add_repository(
+            "/tmp/e",
+            AddRepositoryOptions {
+                skip_active_workspace_assignment: true,
+                ..Default::default()
+            },
+        );
+        assert!(!store.is_repository_in_workspace("/tmp/e", &ws1.id));
+
+        // Renombrar conserva el id.
+        assert!(store.rename_workspace(&ws1.id, "Backend").is_some());
+        assert_eq!(store.workspace(&ws1.id).unwrap().name, "Backend");
+        assert!(store.rename_workspace(&ws1.id, "  ").is_none());
+
+        // Borrar el workspace activo vuelve a "All" sin cerrar repositorios.
+        assert!(store.delete_workspace(&ws1.id).is_some());
+        assert_eq!(store.active_workspace_id(), None);
+        assert_eq!(store.repositories.len(), 5);
+        assert_eq!(store.visible_repositories().len(), 5);
+    }
+
+    #[test]
+    fn normalizes_workspaces_in_session_and_omits_empty_fields_when_serializing() {
+        let empty = WorkspaceSession::default();
+        let serialized = serde_json::to_value(&empty).unwrap();
+        assert!(serialized.get("workspaces").is_none());
+        assert!(serialized.get("activeWorkspaceId").is_none());
+
+        let normalized = normalize_workspace_session(&json!({
+            "openRepositories": ["/tmp/a"],
+            "activeRepositoryPath": "/tmp/a",
+            "workspaces": [
+                { "id": "  ", "name": "Bad" },
+                { "id": "w1", "name": "  " },
+                {
+                    "id": "w1",
+                    "name": "  Core  ",
+                    "repositories": ["/tmp/a/", "/tmp/a", "", 7, "/tmp/b"],
+                    "activeRepositoryPath": "/tmp/missing"
+                },
+                {
+                    "id": "w1",
+                    "name": "Duplicate ID",
+                    "repositories": ["/tmp/c"]
+                },
+                {
+                    "id": "w2",
+                    "name": "Tools",
+                    "repositories": ["/tmp/b"],
+                    "activeRepositoryPath": "/tmp/b/"
+                }
+            ],
+            "activeWorkspaceId": "w2"
+        }));
+
+        assert_eq!(normalized.workspaces.len(), 2);
+        assert_eq!(normalized.workspaces[0].id, "w1");
+        assert_eq!(normalized.workspaces[0].name, "Core");
+        assert_eq!(normalized.workspaces[0].repositories, ["/tmp/a", "/tmp/b"]);
+        assert_eq!(normalized.workspaces[0].active_repository_path, None);
+        assert_eq!(
+            normalized.workspaces[1].active_repository_path.as_deref(),
+            Some("/tmp/b")
+        );
+        assert_eq!(normalized.active_workspace_id.as_deref(), Some("w2"));
+
+        // Un activeWorkspaceId inexistente se descarta a None.
+        let dangling = normalize_workspace_session(&json!({
+            "workspaces": [],
+            "activeWorkspaceId": "ghost"
+        }));
+        assert_eq!(dangling.active_workspace_id, None);
     }
 }

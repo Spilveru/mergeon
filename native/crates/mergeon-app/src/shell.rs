@@ -782,8 +782,23 @@ impl AppModel {
     /// al cerrar, sin reescribir los recientes, y deja activo el que lo estaba.
     pub fn restore_workspace_session(&mut self, cx: &mut Context<Self>) -> Task<()> {
         let session = &self.repositories.workspace_session;
-        let open_repository_paths = session.open_repositories.clone();
+        let mut open_repository_paths = session.open_repositories.clone();
         let preferred_active_path = session.active_repository_path.clone();
+        let active_workspace_id = session.active_workspace_id.clone();
+
+        if let Some(ws_id) = active_workspace_id.as_deref()
+            && let Some(workspace) = self.repositories.workspace(ws_id)
+        {
+            for path in &workspace.repositories {
+                let normalized = normalize_repository_path(path);
+                if !open_repository_paths
+                    .iter()
+                    .any(|existing| normalize_repository_path(existing) == normalized)
+                {
+                    open_repository_paths.push(normalized);
+                }
+            }
+        }
 
         if open_repository_paths.is_empty() {
             return Task::ready(());
@@ -815,10 +830,18 @@ impl AppModel {
                             .or(inspection.path)
                             .filter(|path| !path.is_empty())
                             .unwrap_or_else(|| repo_path.clone());
+                        if let Some(ws_id) = active_workspace_id.as_deref() {
+                            this.repositories.replace_workspace_repository_path(
+                                ws_id,
+                                repo_path,
+                                &canonical_path,
+                            );
+                        }
                         let added = this.add_repository(
                             &canonical_path,
                             AddRepository {
                                 skip_recent_repository_update: true,
+                                skip_active_workspace_assignment: true,
                                 ..Default::default()
                             },
                             cx,
@@ -837,20 +860,45 @@ impl AppModel {
                 }
             }
 
-            let next_active_path = preferred_active_path
-                .map(|path| normalize_repository_path(&path))
-                .filter(|path| restored_paths.contains(path))
-                .or_else(|| restored_paths.first().cloned());
-
             let active = this.update(cx, |this, cx| {
-                if let Some(next_active_path) = next_active_path {
-                    let active_index = this
-                        .repositories
+                let next_active_path = if let Some(ws_id) = active_workspace_id.as_deref()
+                    && let Some(workspace) = this.repositories.workspace(ws_id)
+                {
+                    preferred_active_path
+                        .as_deref()
+                        .map(normalize_repository_path)
+                        .filter(|path| {
+                            workspace.repositories.contains(path) && restored_paths.contains(path)
+                        })
+                        .or_else(|| {
+                            workspace
+                                .active_repository_path
+                                .as_deref()
+                                .map(normalize_repository_path)
+                                .filter(|path| restored_paths.contains(path))
+                        })
+                        .or_else(|| {
+                            workspace
+                                .repositories
+                                .iter()
+                                .find(|path| restored_paths.contains(*path))
+                                .cloned()
+                        })
+                } else {
+                    preferred_active_path
+                        .as_deref()
+                        .map(normalize_repository_path)
+                        .filter(|path| restored_paths.contains(path))
+                        .or_else(|| restored_paths.first().cloned())
+                };
+
+                let active_index = next_active_path.as_deref().and_then(|next_active_path| {
+                    this.repositories
                         .repositories
                         .iter()
-                        .position(|repository| repository.path == next_active_path);
-                    this.set_active_repository(active_index, cx);
-                }
+                        .position(|repository| repository.path == next_active_path)
+                });
+                this.set_active_repository(active_index, cx);
                 this.shell.restoring_workspace = false;
                 this.active_repository().map(|repo| repo.path.clone())
             });

@@ -181,6 +181,7 @@ pub use flows::{
     FlowStatus, LocalChangesMode,
 };
 pub use git_client::{GitMutation, GitOperation};
+pub use mergeon_model::repositories::RepoWorkspace;
 pub use model::{
     AppEvent, AppModel, EventReceiver, OpenRepository, Repositories, backend_with_events,
     event_channel,

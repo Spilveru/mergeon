@@ -160,7 +160,11 @@ type ModelAction = Rc<dyn Fn(&mut AppModel, &mut Context<AppModel>)>;
 type TabCloseHandler = Rc<dyn Fn(&mut AppShell, &mut Context<AppShell>)>;
 
 /// Menú contextual de una pestaña de repositorio.
-fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec<MenuItem> {
+fn repository_tab_menu(
+    model: &Entity<AppModel>,
+    tab: &RepositoryTabMenu,
+    cx: &gpui_kit::App,
+) -> Vec<MenuItem> {
     let action = |run: ModelAction| {
         let model = model.clone();
         move |_: &mut Window, cx: &mut gpui_kit::App| {
@@ -207,6 +211,57 @@ fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
         }
     };
+    let new_workspace_with_repo = {
+        let path = tab.path.clone();
+        action(Rc::new(move |model, cx| {
+            model
+                .prompt_create_workspace(vec![path.clone()], cx)
+                .detach();
+        }))
+    };
+
+    let workspaces: Vec<(String, String, bool)> = {
+        let read = model.read(cx);
+        read.workspaces()
+            .iter()
+            .map(|workspace| {
+                (
+                    workspace.id.clone(),
+                    workspace.name.clone(),
+                    read.is_repository_in_workspace(&tab.path, &workspace.id),
+                )
+            })
+            .collect()
+    };
+
+    let workspace_entry = if workspaces.is_empty() {
+        MenuItem::new("New workspace with this repository…")
+            .icon(Lucide::Folders)
+            .on_click(new_workspace_with_repo)
+    } else {
+        let mut sub_items: Vec<MenuItem> = workspaces
+            .into_iter()
+            .map(|(ws_id, ws_name, is_member)| {
+                let path = tab.path.clone();
+                let toggle = action(Rc::new(move |model, cx| {
+                    if is_member {
+                        model.remove_repository_from_workspace(&path, &ws_id, cx);
+                    } else {
+                        model.add_repository_to_workspace(&path, &ws_id, cx);
+                    }
+                }));
+                MenuItem::new(ws_name).checked(is_member).on_click(toggle)
+            })
+            .collect();
+        sub_items.push(MenuItem::separator());
+        sub_items.push(
+            MenuItem::new("New workspace with this repository…")
+                .icon(Lucide::Plus)
+                .on_click(new_workspace_with_repo),
+        );
+        MenuItem::submenu("Workspaces", sub_items).icon(Lucide::Folders)
+    };
+
     // `mod+w` cierra documentos; el repositorio, `mod+shift+w`.
     let close_shortcut =
         mergeon_model::keyboard_shortcuts::combo_label("mod+shift+w", cfg!(target_os = "macos"));
@@ -221,6 +276,8 @@ fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec
         MenuItem::new("Close to the right")
             .disabled(tab.is_last)
             .on_click(close_right),
+        MenuItem::separator(),
+        workspace_entry,
         MenuItem::separator(),
         MenuItem::new("Copy path")
             .icon(Lucide::Copy)
@@ -239,7 +296,9 @@ fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec
 fn palette_action_uses_repository(action: &PaletteAction) -> bool {
     use ShortcutAction as A;
     match action {
-        PaletteAction::OpenRepository { .. } | PaletteAction::OpenRecent { .. } => false,
+        PaletteAction::OpenRepository { .. }
+        | PaletteAction::OpenRecent { .. }
+        | PaletteAction::SelectWorkspace { .. } => false,
         PaletteAction::Branch(_)
         | PaletteAction::RemoteBranch { .. }
         | PaletteAction::File { .. }
@@ -252,6 +311,10 @@ fn palette_action_uses_repository(action: &PaletteAction) -> bool {
             Command::GoHome
                 | Command::ToggleTheme
                 | Command::Scope(_)
+                | Command::CreateWorkspace
+                | Command::RenameWorkspace
+                | Command::DeleteWorkspace
+                | Command::Pick(Picker::Workspace)
                 | Command::Shortcut(
                     A::OpenRepository
                         | A::CloneFromGitHub
@@ -295,14 +358,30 @@ fn history_position(
     })
 }
 
+/// Resumen de un grupo de repositorios para el selector de la barra de título.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceSummary {
+    id: String,
+    name: String,
+    repo_count: usize,
+}
+
 /// Lo que la cáscara pinta del modelo (rail, pestañas y qué contenido va
 /// debajo). Solo se repinta si cambia; lo de dentro de cada vista hija lo
 /// vigila esa vista.
 #[derive(Debug, Clone, PartialEq)]
 struct ShellState {
-    /// Lo que pinta cada pestaña de repositorio.
+    /// Lo que pinta cada pestaña de repositorio visible en el workspace activo.
     tabs: Vec<RepositoryTabInfo>,
-    active_index: Option<usize>,
+    /// Ids de todos los repositorios abiertos (para conservar vistas montadas
+    /// al cambiar de workspace y mostrar el contador de "All").
+    open_repo_ids: Vec<String>,
+    /// Posición del repositorio activo dentro de `tabs`.
+    active_tab_index: Option<usize>,
+    /// Id del repositorio activo.
+    active_repo_id: Option<String>,
+    workspaces: Vec<WorkspaceSummary>,
+    active_workspace_id: Option<String>,
     settings_tab_open: bool,
     show_preferences: bool,
     restoring: bool,
@@ -312,10 +391,14 @@ struct ShellState {
 
 impl ShellState {
     fn read(model: &AppModel) -> Self {
+        let visible = model.visible_repositories();
+        let active_repo_id = model.active_repository().map(|repo| repo.id.clone());
+        let active_tab_index = active_repo_id
+            .as_deref()
+            .and_then(|active_id| visible.iter().position(|repo| repo.id == active_id));
         Self {
-            tabs: model
-                .open_repositories()
-                .iter()
+            tabs: visible
+                .into_iter()
                 .zip(model.repository_tab_labels())
                 .map(|(repo, label)| RepositoryTabInfo {
                     id: repo.id.clone(),
@@ -338,7 +421,23 @@ impl ShellState {
                         || !repo.mutation_queue.queued.is_empty(),
                 })
                 .collect(),
-            active_index: model.active_repository_index(),
+            open_repo_ids: model
+                .open_repositories()
+                .iter()
+                .map(|repo| repo.id.clone())
+                .collect(),
+            active_tab_index,
+            active_repo_id,
+            workspaces: model
+                .workspaces()
+                .iter()
+                .map(|workspace| WorkspaceSummary {
+                    id: workspace.id.clone(),
+                    name: workspace.name.clone(),
+                    repo_count: workspace.repositories.len(),
+                })
+                .collect(),
+            active_workspace_id: model.active_workspace_id().map(str::to_string),
             settings_tab_open: model.settings_tab_open(),
             show_preferences: model.show_preferences(),
             restoring: model.is_restoring_workspace(),
@@ -501,7 +600,15 @@ impl AppShell {
 
         let active = model.active_repository_index();
         let open = model.open_repositories();
-        for (index, (repo, label)) in open.iter().zip(model.repository_tab_labels()).enumerate() {
+        let open_suffixes = mergeon_model::repositories::distinguishing_parent_suffixes(
+            open.iter()
+                .map(|repo| (repo.name.as_str(), repo.path.as_str())),
+        );
+        for (index, (repo, suffix)) in open.iter().zip(open_suffixes).enumerate() {
+            let label = RepositoryTabLabel {
+                name: repo.name.clone(),
+                suffix,
+            };
             entries.push(PaletteEntry {
                 kind: PaletteKind::Repository,
                 icon: Lucide::FolderGit2,
@@ -645,10 +752,20 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if target.is_none() || mergeon_ui::dialog::open_count(window, cx) > 0 {
+        if mergeon_ui::dialog::open_count(window, cx) > 0 {
+            return;
+        }
+        if picker != Picker::Workspace && target.is_none() {
             return;
         }
         let (entries, options) = match picker {
+            Picker::Workspace => (
+                self.workspace_entries(cx),
+                PaletteOptions {
+                    placeholder: Some("Switch workspace… (type a name)".to_string()),
+                    ..PaletteOptions::default()
+                },
+            ),
             Picker::FileHistory => (
                 Vec::new(),
                 PaletteOptions {
@@ -710,6 +827,55 @@ impl AppShell {
             }
         };
         self.show_palette(entries, options, target, window, cx);
+    }
+
+    /// "Switch workspace…": "All" seguido de cada grupo de repositorios.
+    fn workspace_entries(&self, cx: &gpui_kit::App) -> Vec<PaletteEntry> {
+        let model = self.model.read(cx);
+        let active_id = model.active_workspace_id();
+        let open_count = model.open_repositories().len();
+        let repo_count_label = |count: usize| {
+            if count == 1 {
+                "1 repository".to_string()
+            } else {
+                format!("{count} repositories")
+            }
+        };
+
+        let mut entries = Vec::with_capacity(model.workspaces().len() + 1);
+        entries.push(PaletteEntry {
+            kind: PaletteKind::Command,
+            icon: Lucide::Folders,
+            label: "All".into(),
+            context: if active_id.is_none() {
+                format!("Current · {} open", repo_count_label(open_count)).into()
+            } else {
+                format!("All open · {}", repo_count_label(open_count)).into()
+            },
+            shortcut: None,
+            enabled: true,
+            action: PaletteAction::SelectWorkspace { id: None },
+        });
+        for workspace in model.workspaces() {
+            let is_active = active_id == Some(workspace.id.as_str());
+            let count = repo_count_label(workspace.repositories.len());
+            entries.push(PaletteEntry {
+                kind: PaletteKind::Command,
+                icon: Lucide::Folder,
+                label: workspace.name.clone().into(),
+                context: if is_active {
+                    format!("Current · {count}").into()
+                } else {
+                    count.into()
+                },
+                shortcut: None,
+                enabled: true,
+                action: PaletteAction::SelectWorkspace {
+                    id: Some(workspace.id.clone()),
+                },
+            });
+        }
+        entries
     }
 
     /// "Compare with current branch…": las ramas locales (menos la actual) y
@@ -973,13 +1139,10 @@ impl AppShell {
                 })
             }
             PaletteAction::OpenRepository { id } => model.update(cx, |model, cx| {
-                if let Some(index) = model
-                    .open_repositories()
-                    .iter()
-                    .position(|repo| repo.id == id)
-                {
-                    model.select_repository_tab(index, cx);
-                }
+                model.select_repository_by_id(&id, cx);
+            }),
+            PaletteAction::SelectWorkspace { id } => model.update(cx, |model, cx| {
+                model.select_workspace(id, cx).detach();
             }),
             PaletteAction::OpenRecent { path } => model.update(cx, |model, cx| {
                 model
@@ -1428,6 +1591,7 @@ impl AppShell {
         let drag_label = repository.label.clone();
         let model = self.model.clone();
         container
+            .test_support()
             // Arrastrar para reordenar.
             .on_drag(
                 DraggedRepositoryTab {
@@ -1449,8 +1613,122 @@ impl AppShell {
                     });
                 }),
             )
-            .context_menu_items(move |_, _| repository_tab_menu(&model, &repository))
+            .context_menu_items(move |_, cx| repository_tab_menu(&model, &repository, cx))
             .into_any_element()
+    }
+
+    fn render_workspace_switcher(&self) -> Option<gpui_kit::AnyElement> {
+        if self.shown.workspaces.is_empty() {
+            return None;
+        }
+        let workspaces = self.shown.workspaces.clone();
+        let active_workspace_id = self.shown.active_workspace_id.clone();
+        let total_open = self.shown.open_repo_ids.len();
+        let active_label = active_workspace_id
+            .as_deref()
+            .and_then(|id| workspaces.iter().find(|ws| ws.id == id))
+            .map(|ws| ws.name.clone())
+            .unwrap_or_else(|| "All".to_string());
+        let tooltip = match active_workspace_id.as_deref() {
+            Some(_) => format!("Workspace: {active_label}"),
+            None => "Workspace: All repositories".to_string(),
+        };
+        let model = self.model.clone();
+
+        Some(
+            div()
+                .occlude()
+                .flex_none()
+                .child(
+                    mergeon_ui::button("workspace-switcher")
+                        .outline()
+                        .xs()
+                        .icon(Lucide::Folders)
+                        .label(active_label)
+                        .trailing_icon(Lucide::ChevronDown)
+                        .tooltip(tooltip)
+                        .dropdown_menu_items(move |_, _| {
+                            let mut items = Vec::new();
+                            let all_model = model.clone();
+                            items.push(
+                                MenuItem::new("All")
+                                    .icon(Lucide::Folders)
+                                    .detail(total_open.to_string())
+                                    .checked(active_workspace_id.is_none())
+                                    .on_click(move |_, cx| {
+                                        all_model.update(cx, |model, cx| {
+                                            model.select_workspace(None, cx).detach();
+                                        });
+                                    }),
+                            );
+                            for workspace in &workspaces {
+                                let ws_model = model.clone();
+                                let ws_id = workspace.id.clone();
+                                let is_active =
+                                    active_workspace_id.as_deref() == Some(workspace.id.as_str());
+                                items.push(
+                                    MenuItem::new(workspace.name.clone())
+                                        .icon(Lucide::Folder)
+                                        .detail(workspace.repo_count.to_string())
+                                        .checked(is_active)
+                                        .on_click(move |_, cx| {
+                                            ws_model.update(cx, |model, cx| {
+                                                model
+                                                    .select_workspace(Some(ws_id.clone()), cx)
+                                                    .detach();
+                                            });
+                                        }),
+                                );
+                            }
+                            items.push(MenuItem::separator());
+                            let create_model = model.clone();
+                            items.push(
+                                MenuItem::new("New workspace…").icon(Lucide::Plus).on_click(
+                                    move |_, cx| {
+                                        create_model.update(cx, |model, cx| {
+                                            let initial = model
+                                                .active_repository()
+                                                .map(|repo| vec![repo.path.clone()])
+                                                .unwrap_or_default();
+                                            model.prompt_create_workspace(initial, cx).detach();
+                                        });
+                                    },
+                                ),
+                            );
+                            if let Some(active_id) = &active_workspace_id {
+                                let rename_model = model.clone();
+                                let rename_id = active_id.clone();
+                                items.push(
+                                    MenuItem::new("Rename workspace…")
+                                        .icon(Lucide::Pencil)
+                                        .on_click(move |_, cx| {
+                                            rename_model.update(cx, |model, cx| {
+                                                model
+                                                    .prompt_rename_workspace(&rename_id, cx)
+                                                    .detach();
+                                            });
+                                        }),
+                                );
+                                let delete_model = model.clone();
+                                let delete_id = active_id.clone();
+                                items.push(
+                                    MenuItem::new("Delete workspace")
+                                        .icon(Lucide::Trash)
+                                        .danger()
+                                        .on_click(move |_, cx| {
+                                            delete_model.update(cx, |model, cx| {
+                                                model
+                                                    .confirm_delete_workspace(&delete_id, cx)
+                                                    .detach();
+                                            });
+                                        }),
+                                );
+                            }
+                            items
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Lleva la pestaña activa a la vista cuando cambia (o cambia el número de
@@ -1477,19 +1755,19 @@ impl AppShell {
 
     fn render_tab_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repositories: Vec<RepositoryTabInfo> = self.shown.tabs.clone();
-        let active_index = self.shown.active_index;
+        let active_index = self.shown.active_tab_index;
         let settings_open = self.shown.settings_tab_open;
         let settings_active = self.shown.show_preferences;
         let restoring = self.shown.restoring;
-        let home_active = !settings_active && active_index.is_none();
+        let home_active = !settings_active && self.shown.active_repo_id.is_none();
         let repository_count = repositories.len();
 
-        // Hijos de la tira: Home (0), un repositorio por pestaña y Settings.
-        if !restoring {
+        // Hijos de la tira desplazable: un repositorio por pestaña y Settings.
+        if !restoring && (settings_active || active_index.is_some()) {
             let active_child = if settings_active {
-                repository_count + 1
+                repository_count
             } else {
-                active_index.map_or(0, |index| index + 1)
+                active_index.unwrap_or(0)
             };
             // El punto de cambios o el spinner llegan después y ensanchan la
             // pestaña: también cuentan para volver a traerla a la vista.
@@ -1505,6 +1783,26 @@ impl AppShell {
             self.scroll_active_tab_into_view(target, window);
         }
 
+        let home_tab = self.project_tab(
+            ProjectTab {
+                id: "tab-home".into(),
+                icon: Lucide::House,
+                icon_active_tone: false,
+                name: "Home".into(),
+                suffix: None,
+                title: None,
+                active: home_active,
+                mark: TabMark::None,
+                busy: false,
+                closable: false,
+                repository: None,
+            },
+            |this, cx| this.model.update(cx, |model, cx| model.show_home_tab(cx)),
+            |_, _| {},
+            cx,
+        );
+        let workspace_switcher = self.render_workspace_switcher();
+
         let mut tabs = div()
             .id("project-tabs")
             .flex()
@@ -1516,29 +1814,12 @@ impl AppShell {
             .items_center()
             .gap(px(6.))
             .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll)
-            .child(self.project_tab(
-                ProjectTab {
-                    id: "tab-home".into(),
-                    icon: Lucide::House,
-                    icon_active_tone: false,
-                    name: "Home".into(),
-                    suffix: None,
-                    title: None,
-                    active: home_active,
-                    mark: TabMark::None,
-                    busy: false,
-                    closable: false,
-                    repository: None,
-                },
-                |this, cx| this.model.update(cx, |model, cx| model.show_home_tab(cx)),
-                |_, _| {},
-                cx,
-            ));
+            .track_scroll(&self.tab_scroll);
 
         for (index, info) in repositories.iter().enumerate() {
             let active = !settings_active && active_index == Some(index);
-            let id = info.id.clone();
+            let select_id = info.id.clone();
+            let close_id = info.id.clone();
             tabs = tabs.child(self.project_tab(
                 ProjectTab {
                     id: SharedString::from(format!("tab-repo-{}", info.id)),
@@ -1561,11 +1842,13 @@ impl AppShell {
                     }),
                 },
                 move |this, cx| {
-                    this.model
-                        .update(cx, |model, cx| model.select_repository_tab(index, cx))
+                    let id = select_id.clone();
+                    this.model.update(cx, |model, cx| {
+                        model.select_repository_by_id(&id, cx);
+                    })
                 },
                 move |this, cx| {
-                    let id = id.clone();
+                    let id = close_id.clone();
                     this.model.update(cx, |model, cx| {
                         model.request_close_repositories(vec![id], cx).detach();
                     })
@@ -1602,16 +1885,15 @@ impl AppShell {
             ));
         }
 
-        // "▾": todas las pestañas de repositorio en una lista, con su carpeta
-        // y lo que piden atención, para llegar a las que no caben.
+        // "▾": todas las pestañas de repositorio visibles en una lista, con su
+        // carpeta, lo que piden atención y acceso rápido a crear un workspace.
         let tab_list = (repository_count >= 2).then(|| {
             let model = self.model.clone();
-            let entries: Vec<(usize, String, String, TabMark, bool)> = repositories
+            let entries: Vec<(String, String, String, TabMark, bool)> = repositories
                 .iter()
-                .enumerate()
-                .map(|(index, info)| {
+                .map(|info| {
                     (
-                        index,
+                        info.id.clone(),
                         info.label.text(),
                         parent_folder(&info.path),
                         info.mark,
@@ -1619,7 +1901,9 @@ impl AppShell {
                     )
                 })
                 .collect();
-            let current = active_index.filter(|_| !settings_active);
+            let current_id = (!settings_active)
+                .then(|| self.shown.active_repo_id.clone())
+                .flatten();
             div().occlude().flex_none().child(
                 mergeon_ui::button("repository-tab-list")
                     .ghost()
@@ -1627,11 +1911,11 @@ impl AppShell {
                     .icon(Lucide::ChevronDown)
                     .tooltip("Open repositories")
                     .dropdown_menu_items(move |_, _| {
-                        entries
+                        let mut items: Vec<MenuItem> = entries
                             .iter()
-                            .map(|(index, label, folder, mark, busy)| {
+                            .map(|(repo_id, label, folder, mark, busy)| {
                                 let model = model.clone();
-                                let index = *index;
+                                let id = repo_id.clone();
                                 let icon = if *busy {
                                     Lucide::LoaderCircle
                                 } else {
@@ -1645,14 +1929,30 @@ impl AppShell {
                                 MenuItem::new(label.clone())
                                     .icon(icon)
                                     .detail(folder.clone())
-                                    .checked(current == Some(index))
+                                    .checked(current_id.as_deref() == Some(repo_id.as_str()))
                                     .on_click(move |_, cx| {
                                         model.update(cx, |model, cx| {
-                                            model.select_repository_tab(index, cx)
+                                            model.select_repository_by_id(&id, cx);
                                         });
                                     })
                             })
-                            .collect()
+                            .collect();
+                        let create_model = model.clone();
+                        items.push(MenuItem::separator());
+                        items.push(
+                            MenuItem::new("New workspace…")
+                                .icon(Lucide::Folders)
+                                .on_click(move |_, cx| {
+                                    create_model.update(cx, |model, cx| {
+                                        let initial = model
+                                            .active_repository()
+                                            .map(|repo| vec![repo.path.clone()])
+                                            .unwrap_or_default();
+                                        model.prompt_create_workspace(initial, cx).detach();
+                                    });
+                                }),
+                        );
+                        items
                     }),
             )
         });
@@ -1692,7 +1992,9 @@ impl AppShell {
                     .h_full()
                     .items_center()
                     .gap(px(4.))
-                    .child(tabs)
+                    .child(home_tab)
+                    .children(workspace_switcher)
+                    .when(repository_count > 0 || settings_open, |bar| bar.child(tabs))
                     .child(open_repository)
                     // Hueco libre: arrastra la ventana.
                     .child(div().flex_1().min_w(px(24.)).h_full())
@@ -1708,11 +2010,7 @@ impl AppShell {
     ) -> gpui_kit::AnyElement {
         let show_preferences = self.shown.show_preferences;
         let settings_open = self.shown.settings_tab_open;
-        let active = self
-            .shown
-            .active_index
-            .and_then(|index| self.shown.tabs.get(index))
-            .map(|info| info.id.clone());
+        let active = self.shown.active_repo_id.clone();
         let restoring = self.shown.restoring;
 
         if settings_open && show_preferences {
@@ -1781,10 +2079,11 @@ impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
         FIRST_FRAME.call_once(|| mergeon_app::startup::trace("first frame"));
-        // Los espacios de trabajo de repos cerrados no deben seguir vivos.
-        let tabs = &self.shown.tabs;
+        // Los espacios de trabajo de repos cerrados no deben seguir vivos
+        // (los de otros workspaces que siguen abiertos sí se conservan).
+        let open_ids = &self.shown.open_repo_ids;
         self.workspaces
-            .retain(|id, _| tabs.iter().any(|info| info.id == *id));
+            .retain(|id, _| open_ids.iter().any(|open_id| open_id == id));
 
         let content = self.render_content(window, cx);
         div()
@@ -1898,5 +2197,70 @@ mod tests {
             Some(WindowControlArea::Drag),
             "{empty:?}"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn workspace_switcher_uses_progressive_disclosure_and_filters_titlebar_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (backend, events) = mergeon_app::testing::TestBackend::new().build();
+        let model = cx.update(|cx| {
+            crate::init_bindings(cx);
+            AppModel::init(backend, events, cx)
+        });
+        model
+            .update(cx, |model, cx| {
+                model.add_repository("/tmp/ws-alpha", mergeon_app::AddRepository::default(), cx)
+            })
+            .await
+            .expect("alpha");
+        model
+            .update(cx, |model, cx| {
+                model.add_repository("/tmp/ws-beta", mergeon_app::AddRepository::default(), cx)
+            })
+            .await
+            .expect("beta");
+        let window = cx.update(|cx| {
+            let options = WindowOptions {
+                window_decorations: Some(WindowDecorations::Client),
+                ..TitleBar::window_options()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| AppShell::new(window, cx))
+            })
+            .expect("ventana de prueba")
+            .0
+        });
+        cx.run_until_parked();
+
+        // Sin workspaces: la barra de título no muestra el selector y muestra ambas pestañas.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("workspace-switcher").is_none());
+            assert!(window.try_find("tab-repo-/tmp/ws-alpha").is_some());
+            assert!(window.try_find("tab-repo-/tmp/ws-beta").is_some());
+        })
+        .expect("ventana");
+
+        // Al crear y activar un workspace con solo alpha, aparece el selector y beta se oculta.
+        let ws = model.update(cx, |model, cx| {
+            model
+                .create_workspace("Work", vec!["/tmp/ws-alpha".into()], cx)
+                .expect("workspace")
+        });
+        model
+            .update(cx, |model, cx| model.select_workspace(Some(ws.id), cx))
+            .await;
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("workspace-switcher").is_some());
+            assert!(window.try_find("tab-repo-/tmp/ws-alpha").is_some());
+            assert!(window.try_find("tab-repo-/tmp/ws-beta").is_none());
+        })
+        .expect("ventana");
+        assert_eq!(control_area_over(cx, window, "workspace-switcher"), None);
     }
 }

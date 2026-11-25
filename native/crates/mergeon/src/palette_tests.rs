@@ -311,6 +311,8 @@ async fn every_registered_command_runs_its_action(cx: &mut TestAppContext) {
                     | Command::Pick(_)
                     | Command::Sidebar(_)
                     | Command::OpenCurrentPullRequest
+                    | Command::RenameWorkspace
+                    | Command::DeleteWorkspace
                     // Necesitan algo en la pila (su test: `undo_and_redo_commands_follow_the_history`).
                     | Command::Shortcut(ShortcutAction::Undo | ShortcutAction::Redo)
             )
@@ -1263,4 +1265,74 @@ async fn the_title_bar_holds_open_the_log_and_settings(cx: &mut TestAppContext) 
             .iter()
             .any(|spec| spec.label == "Reload application")
     );
+}
+
+#[gpui_kit::test]
+async fn workspace_commands_create_switch_rename_and_delete_from_the_palette(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx, true);
+    let first = repository("palette-ws-a");
+    let second = repository("palette-ws-b");
+    let first_id = harness.open(&first, cx).await;
+    let second_id = harness.open(&second, cx).await;
+
+    // Crear workspace desde la paleta (incluye el repo activo `second` y cambia a él).
+    harness.host.answer_prompt("Work");
+    harness.run_command(cx, "Create workspace…");
+    let model = harness.model.clone();
+    wait_until(cx, "workspace creado", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace().map(|ws| ws.name.as_str()) == Some("Work")
+        })
+    });
+    model.read_with(cx, |model, _| {
+        let visible: Vec<&str> = model
+            .visible_repositories()
+            .into_iter()
+            .map(|repo| repo.id.as_str())
+            .collect();
+        assert_eq!(visible, [second_id.as_str()]);
+    });
+
+    // Crear un segundo workspace con `first` y cambiar a él con "Switch workspace…".
+    model.update(cx, |model, cx| {
+        model
+            .create_workspace("Personal", vec![first_id.clone()], cx)
+            .expect("personal");
+    });
+    cx.run_until_parked();
+
+    harness.run_command(cx, "Switch workspace…");
+    assert!(harness.palette(cx).is_some(), "selector de workspaces");
+    assert_eq!(harness.labels(cx), ["All", "Work", "Personal"]);
+    harness.set_query(cx, "Personal");
+    assert_eq!(harness.labels(cx), ["Personal"]);
+    harness.in_window(cx, |window, cx| window.press("enter", cx));
+    wait_until(cx, "cambio a Personal", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace().map(|ws| ws.name.as_str()) == Some("Personal")
+                && model.active_repository().map(|repo| repo.id.as_str()) == Some(first_id.as_str())
+        })
+    });
+
+    // Renombrar el workspace activo desde la paleta.
+    harness.host.answer_prompt("Side Projects");
+    harness.run_command(cx, "Rename current workspace…");
+    wait_until(cx, "workspace renombrado", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace().map(|ws| ws.name.as_str()) == Some("Side Projects")
+        })
+    });
+
+    // Borrar el workspace activo desde la paleta: vuelve a "All" sin cerrar repositorios.
+    harness.host.answer_confirm(true);
+    harness.run_command(cx, "Delete current workspace");
+    wait_until(cx, "workspace borrado", |cx| {
+        model.read_with(cx, |model, _| model.active_workspace_id().is_none())
+    });
+    model.read_with(cx, |model, _| {
+        assert_eq!(model.open_repositories().len(), 2);
+        assert_eq!(model.workspaces().len(), 1);
+    });
 }

@@ -10,10 +10,11 @@
 use anyhow::anyhow;
 use gpui_kit::{Context, Task};
 use mergeon_backend::{StashEntry, StructuredStatus, Submodule};
+use mergeon_model::dialogs::{ConfirmOptions, PromptOptions};
 use mergeon_model::operation_types::QueueOperation;
 use mergeon_model::repositories::{
-    AddRepositoryOptions, MutationQueueSnapshot, RecentRepository, RepoKey, SidebarSection,
-    WorkspaceSession,
+    AddRepositoryOptions, MutationQueueSnapshot, RecentRepository, RepoKey, RepoWorkspace,
+    SidebarSection, WorkspaceSession, normalize_repository_path,
 };
 use mergeon_model::repository_read_model::{BranchItem, RemoteItem};
 
@@ -33,6 +34,9 @@ pub struct AddRepository {
     pub canonical_path: Option<String>,
     /// No tocar la lista de recientes (al restaurar la sesión).
     pub skip_recent_repository_update: bool,
+    /// No añadir el repositorio al workspace activo (al restaurar la sesión o
+    /// al abrir los repositorios propios de un workspace al cambiar a él).
+    pub skip_active_workspace_assignment: bool,
 }
 
 impl AppModel {
@@ -80,7 +84,34 @@ impl AppModel {
         &self.repositories.workspace_session
     }
 
-    fn active_repository_id(&self) -> Option<String> {
+    /// Grupos nombrados de repositorios.
+    pub fn workspaces(&self) -> &[RepoWorkspace] {
+        self.repositories.workspaces()
+    }
+
+    /// Id del grupo activo, o `None` cuando está activo "All".
+    pub fn active_workspace_id(&self) -> Option<&str> {
+        self.repositories.active_workspace_id()
+    }
+
+    /// El grupo activo, o `None` en "All".
+    pub fn active_workspace(&self) -> Option<&RepoWorkspace> {
+        self.repositories.active_workspace()
+    }
+
+    /// Repositorios abiertos visibles en la barra de pestañas (filtrados y
+    /// ordenados por el workspace activo, o todos si está activo "All").
+    pub fn visible_repositories(&self) -> Vec<&OpenRepository> {
+        self.repositories.visible_repositories()
+    }
+
+    /// Si `repo_path` pertenece al workspace `workspace_id`.
+    pub fn is_repository_in_workspace(&self, repo_path: &str, workspace_id: &str) -> bool {
+        self.repositories
+            .is_repository_in_workspace(repo_path, workspace_id)
+    }
+
+    pub(crate) fn active_repository_id(&self) -> Option<String> {
         self.repositories
             .active_repository()
             .map(|repository| repository.id.clone())
@@ -161,6 +192,7 @@ impl AppModel {
                 remote_url: options.remote_url.as_deref(),
                 canonical_path: options.canonical_path.as_deref(),
                 skip_recent_repository_update: options.skip_recent_repository_update,
+                skip_active_workspace_assignment: options.skip_active_workspace_assignment,
             },
         ) else {
             return Task::ready(Ok(()));
@@ -235,6 +267,442 @@ impl AppModel {
         self.persist_workspace_session(cx).detach();
         self.after_active_repository_change(previous_id, cx);
         cx.notify();
+    }
+
+    /// Activa un repositorio abierto por `id`. Si hay un workspace activo al
+    /// que ese repositorio no pertenece, pasa a "All" para mantener la pestaña
+    /// activa siempre visible.
+    pub fn select_repository_by_id(&mut self, repo_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.find_repository_index(repo_id) else {
+            return false;
+        };
+        let path = self.repositories.repositories[index].path.clone();
+        if let Some(active_ws_id) = self.active_workspace_id().map(str::to_string)
+            && !self
+                .repositories
+                .is_repository_in_workspace(&path, &active_ws_id)
+        {
+            self.repositories.set_active_workspace(None);
+        }
+        self.select_repository_tab(index, cx);
+        true
+    }
+
+    /// Selecciona una pestaña por su posición en la barra visible.
+    pub fn select_visible_repository_tab(&mut self, visible_index: usize, cx: &mut Context<Self>) {
+        let Some(repo_id) = self
+            .visible_repositories()
+            .get(visible_index)
+            .map(|repo| repo.id.clone())
+        else {
+            return;
+        };
+        if let Some(index) = self.find_repository_index(repo_id.as_str()) {
+            self.select_repository_tab(index, cx);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Workspaces (grupos de repositorios)
+    // ------------------------------------------------------------------
+
+    /// Crea un grupo nuevo con `initial_repos` y persiste la sesión.
+    pub fn create_workspace(
+        &mut self,
+        name: &str,
+        initial_repos: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<RepoWorkspace> {
+        let (workspace, _) = self.repositories.create_workspace(name, &initial_repos)?;
+        self.persist_workspace_session(cx).detach();
+        cx.notify();
+        Some(workspace)
+    }
+
+    /// Renombra un grupo existente y persiste la sesión.
+    pub fn rename_workspace(&mut self, id: &str, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.repositories.rename_workspace(id, name).is_none() {
+            return false;
+        }
+        self.persist_workspace_session(cx).detach();
+        cx.notify();
+        true
+    }
+
+    /// Borra un grupo sin cerrar sus repositorios. Si era el activo, cambia a
+    /// "All" (`None`).
+    pub fn delete_workspace(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.repositories.delete_workspace(id).is_none() {
+            return false;
+        }
+        self.persist_workspace_session(cx).detach();
+        cx.notify();
+        true
+    }
+
+    /// Añade un repositorio a un grupo y persiste la sesión.
+    pub fn add_repository_to_workspace(
+        &mut self,
+        repo_path: &str,
+        workspace_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .repositories
+            .add_repository_to_workspace(repo_path, workspace_id)
+            .is_none()
+        {
+            return false;
+        }
+        self.persist_workspace_session(cx).detach();
+        cx.notify();
+        true
+    }
+
+    /// Quita un repositorio de un grupo sin cerrarlo de `open_repositories`.
+    /// Si era el repositorio activo dentro del grupo activo, activa la
+    /// siguiente pestaña visible del grupo (o vuelve a Home si queda vacío).
+    pub fn remove_repository_from_workspace(
+        &mut self,
+        repo_path: &str,
+        workspace_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let normalized = normalize_repository_path(repo_path);
+        let is_active_workspace = self.active_workspace_id() == Some(workspace_id);
+        let removing_active_repo = is_active_workspace
+            && self
+                .active_repository()
+                .is_some_and(|repo| normalize_repository_path(&repo.path) == normalized);
+
+        let next_visible_id = if removing_active_repo {
+            let visible: Vec<String> = self
+                .visible_repositories()
+                .into_iter()
+                .map(|repo| repo.id.clone())
+                .collect();
+            let current_pos = self
+                .active_repository()
+                .and_then(|active| visible.iter().position(|id| id == &active.id));
+            let remaining: Vec<String> = visible
+                .into_iter()
+                .filter(|id| {
+                    self.repository(id.as_str())
+                        .is_none_or(|repo| normalize_repository_path(&repo.path) != normalized)
+                })
+                .collect();
+            current_pos
+                .and_then(|pos| remaining.get(pos).or_else(|| remaining.last()))
+                .cloned()
+        } else {
+            None
+        };
+
+        if self
+            .repositories
+            .remove_repository_from_workspace(&normalized, workspace_id)
+            .is_none()
+        {
+            return false;
+        }
+
+        if removing_active_repo {
+            let next_index = next_visible_id
+                .as_deref()
+                .and_then(|id| self.find_repository_index(id));
+            self.set_active_repository(next_index, cx);
+        } else {
+            self.persist_workspace_session(cx).detach();
+            cx.notify();
+        }
+        true
+    }
+
+    /// Cambia el grupo activo (`None` = "All"). Al entrar en un grupo:
+    /// - Abre limpiamente los repositorios del grupo que aún no estén en
+    ///   `open_repositories`, sin cerrar los de otros grupos.
+    /// - Activa `active_repository_path` del grupo, o su primer repositorio,
+    ///   o Home si el grupo está vacío.
+    pub fn select_workspace(
+        &mut self,
+        workspace_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let Some(id) = workspace_id else {
+            if self.active_workspace_id().is_none() {
+                return Task::ready(());
+            }
+            self.repositories.set_active_workspace(None);
+            self.persist_workspace_session(cx).detach();
+            cx.notify();
+            return Task::ready(());
+        };
+
+        let Some(workspace) = self.repositories.workspace(&id).cloned() else {
+            return Task::ready(());
+        };
+        let preferred_active_path = workspace.active_repository_path.clone();
+
+        self.repositories.set_active_workspace(Some(&id));
+
+        let missing: Vec<String> = workspace
+            .repositories
+            .iter()
+            .filter(|path| {
+                !self
+                    .repositories
+                    .repositories
+                    .iter()
+                    .any(|repo| normalize_repository_path(&repo.path) == **path)
+            })
+            .cloned()
+            .collect();
+
+        if missing.is_empty() {
+            self.activate_preferred_workspace_repository(&id, preferred_active_path.as_deref(), cx);
+            return Task::ready(());
+        }
+
+        // Persistimos enseguida el cambio de workspace para que el selector
+        // refleje el nuevo grupo mientras cargan los repositorios faltantes.
+        self.persist_workspace_session(cx).detach();
+        cx.notify();
+
+        flow(cx, async move |this, cx| {
+            let inspections = this.update(cx, |this, cx| {
+                missing
+                    .iter()
+                    .map(|repo_path| this.inspect_repository(repo_path, cx))
+                    .collect::<Vec<_>>()
+            });
+            let inspections = futures::future::join_all(inspections).await;
+
+            let (previous_id, was_restoring, preferred_active_path, added) =
+                this.update(cx, |this, cx| {
+                    let previous_id = this.active_repository_id();
+                    let was_restoring = this.shell.restoring_workspace;
+                    let mut preferred_active_path = preferred_active_path;
+                    this.shell.restoring_workspace = true;
+                    let added = missing
+                        .iter()
+                        .zip(inspections)
+                        .filter(|(_, inspection)| inspection.valid)
+                        .map(|(repo_path, inspection)| {
+                            let canonical_path = inspection
+                                .canonical_path
+                                .or(inspection.path)
+                                .filter(|path| !path.is_empty())
+                                .unwrap_or_else(|| repo_path.clone());
+                            if this.repositories.replace_workspace_repository_path(
+                                &id,
+                                repo_path,
+                                &canonical_path,
+                            ) && preferred_active_path.as_deref()
+                                == Some(normalize_repository_path(repo_path).as_str())
+                            {
+                                preferred_active_path =
+                                    Some(normalize_repository_path(&canonical_path));
+                            }
+                            let task = this.add_repository(
+                                &canonical_path,
+                                AddRepository {
+                                    skip_recent_repository_update: true,
+                                    skip_active_workspace_assignment: true,
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                            (repo_path.clone(), task)
+                        })
+                        .collect::<Vec<_>>();
+                    (previous_id, was_restoring, preferred_active_path, added)
+                });
+
+            for (repo_path, task) in added {
+                if let Err(error) = task.await {
+                    log::warn!("Failed to open workspace repository {repo_path}: {error}");
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                this.shell.restoring_workspace = was_restoring;
+                if this.active_workspace_id() != Some(id.as_str()) {
+                    return;
+                }
+                let target_index = this
+                    .preferred_workspace_repository_index(&id, preferred_active_path.as_deref());
+                if target_index.is_some() {
+                    this.shell.show_preferences = false;
+                }
+                this.repositories.set_active_repository(target_index);
+                this.persist_workspace_session(cx).detach();
+                this.after_active_repository_change(previous_id, cx);
+                cx.notify();
+            });
+        })
+    }
+
+    fn preferred_workspace_repository_index(
+        &self,
+        workspace_id: &str,
+        preferred_path: Option<&str>,
+    ) -> Option<usize> {
+        let workspace = self.repositories.workspace(workspace_id)?;
+        let find_open = |target: &str| {
+            self.repositories
+                .repositories
+                .iter()
+                .position(|repo| normalize_repository_path(&repo.path) == target)
+        };
+        preferred_path
+            .or(workspace.active_repository_path.as_deref())
+            .filter(|path| workspace.repositories.iter().any(|repo| repo == path))
+            .and_then(find_open)
+            .or_else(|| {
+                workspace
+                    .repositories
+                    .iter()
+                    .find_map(|path| find_open(path))
+            })
+    }
+
+    fn activate_preferred_workspace_repository(
+        &mut self,
+        workspace_id: &str,
+        preferred_path: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        match self.preferred_workspace_repository_index(workspace_id, preferred_path) {
+            Some(index) => self.select_repository_tab(index, cx),
+            None => self.show_home_tab(cx),
+        }
+    }
+
+    /// Pide un nombre al usuario, crea el workspace con `initial_repos` y pasa
+    /// a él.
+    pub fn prompt_create_workspace(
+        &mut self,
+        initial_repos: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<RepoWorkspace>> {
+        let prompt = self.prompt(
+            PromptOptions {
+                title: Some("New workspace".to_string()),
+                description: Some(
+                    "Group repositories together so you can switch between focused sets of tabs."
+                        .to_string(),
+                ),
+                confirm_text: Some("Create".to_string()),
+                cancel_text: Some("Cancel".to_string()),
+                placeholder: Some("e.g. Work, Backend, Personal".to_string()),
+                pattern: Some("\\S".to_string()),
+                input_error_message: Some("Please enter a workspace name.".to_string()),
+                ..Default::default()
+            },
+            cx,
+        );
+        flow(cx, async move |this, cx| {
+            let answer = prompt.await;
+            let name = answer
+                .value
+                .filter(|value| answer.confirmed && !value.trim().is_empty())?;
+            let created = this.update(cx, |this, cx| {
+                let workspace = this.create_workspace(&name, initial_repos, cx)?;
+                let switch = this.select_workspace(Some(workspace.id.clone()), cx);
+                this.notify_success(
+                    &format!("Workspace \u{201c}{}\u{201d} created", workspace.name),
+                    cx,
+                );
+                Some((workspace, switch))
+            });
+            let (workspace, switch) = created?;
+            switch.await;
+            Some(workspace)
+        })
+    }
+
+    /// Pide un nuevo nombre para el workspace `id` y lo renombra.
+    pub fn prompt_rename_workspace(&mut self, id: &str, cx: &mut Context<Self>) -> Task<bool> {
+        let Some(current_name) = self
+            .repositories
+            .workspace(id)
+            .map(|workspace| workspace.name.clone())
+        else {
+            return Task::ready(false);
+        };
+        let id = id.to_string();
+        let prompt = self.prompt(
+            PromptOptions {
+                title: Some("Rename workspace".to_string()),
+                description: Some(format!(
+                    "Enter a new name for \u{201c}{current_name}\u{201d}."
+                )),
+                confirm_text: Some("Rename".to_string()),
+                cancel_text: Some("Cancel".to_string()),
+                placeholder: Some("Workspace name".to_string()),
+                default_value: Some(current_name),
+                pattern: Some("\\S".to_string()),
+                input_error_message: Some("Please enter a workspace name.".to_string()),
+                ..Default::default()
+            },
+            cx,
+        );
+        flow(cx, async move |this, cx| {
+            let answer = prompt.await;
+            let Some(name) = answer
+                .value
+                .filter(|value| answer.confirmed && !value.trim().is_empty())
+            else {
+                return false;
+            };
+            this.update(cx, |this, cx| {
+                let renamed = this.rename_workspace(&id, &name, cx);
+                if renamed {
+                    this.notify_success(
+                        &format!("Workspace renamed to \u{201c}{}\u{201d}", name.trim()),
+                        cx,
+                    );
+                }
+                renamed
+            })
+        })
+    }
+
+    /// Pide confirmación y borra el workspace `id` (sin cerrar sus repositorios).
+    pub fn confirm_delete_workspace(&mut self, id: &str, cx: &mut Context<Self>) -> Task<bool> {
+        let Some(name) = self
+            .repositories
+            .workspace(id)
+            .map(|workspace| workspace.name.clone())
+        else {
+            return Task::ready(false);
+        };
+        let id = id.to_string();
+        let confirm = self.confirm(
+            ConfirmOptions {
+                title: Some(format!("Delete workspace \u{201c}{name}\u{201d}?")),
+                description: Some(
+                    "Your repositories will remain open and accessible under All.".to_string(),
+                ),
+                confirm_text: Some("Delete".to_string()),
+                cancel_text: Some("Cancel".to_string()),
+                variant: Some("destructive".to_string()),
+                ..Default::default()
+            },
+            cx,
+        );
+        flow(cx, async move |this, cx| {
+            if !confirm.await {
+                return false;
+            }
+            this.update(cx, |this, cx| {
+                let deleted = this.delete_workspace(&id, cx);
+                if deleted {
+                    this.notify_success(&format!("Workspace \u{201c}{name}\u{201d} deleted"), cx);
+                }
+                deleted
+            })
+        })
     }
 
     // ------------------------------------------------------------------

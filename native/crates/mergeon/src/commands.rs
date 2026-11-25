@@ -51,6 +51,12 @@ pub enum Command {
     /// El PR de la rama actual en el navegador (como el indicador de la
     /// barra de estado).
     OpenCurrentPullRequest,
+    /// Crea un nuevo workspace (grupo de repositorios).
+    CreateWorkspace,
+    /// Renombra el workspace activo.
+    RenameWorkspace,
+    /// Borra el workspace activo (sin cerrar repositorios).
+    DeleteWorkspace,
 }
 
 /// Los comandos de la paleta que son una entrada de menú del sidebar.
@@ -88,6 +94,8 @@ pub enum Picker {
     /// "Checkout pull request…": uno de los PRs abiertos del repositorio →
     /// trae su rama y la desprotege (como "Checkout PR branch" del sidebar).
     PullRequest,
+    /// "Switch workspace…": elige "All" o uno de los grupos de repositorios.
+    Workspace,
 }
 
 /// Una entrada del registro.
@@ -395,6 +403,34 @@ pub const COMMANDS: &[CommandSpec] = &[
         Lucide::House,
         Command::GoHome,
     ),
+    spec(
+        "switch-workspace",
+        "Switch workspace…",
+        NAVIGATION,
+        Lucide::Folders,
+        Command::Pick(Picker::Workspace),
+    ),
+    spec(
+        "create-workspace",
+        "Create workspace…",
+        APPLICATION,
+        Lucide::SquarePlus,
+        Command::CreateWorkspace,
+    ),
+    spec(
+        "rename-workspace",
+        "Rename current workspace…",
+        APPLICATION,
+        Lucide::Pencil,
+        Command::RenameWorkspace,
+    ),
+    spec(
+        "delete-workspace",
+        "Delete current workspace",
+        APPLICATION,
+        Lucide::Trash,
+        Command::DeleteWorkspace,
+    ),
     shortcut(
         "settings",
         "Settings",
@@ -458,6 +494,10 @@ pub struct CommandContext {
     /// (`AppModel::can_undo`).
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Número de grupos de repositorios definidos.
+    pub workspace_count: usize,
+    /// Hay un workspace personalizado activo (no "All").
+    pub has_active_workspace: bool,
 }
 
 impl CommandContext {
@@ -467,7 +507,7 @@ impl CommandContext {
             has_repository: active.is_some(),
             repository_idle: active
                 .is_some_and(|repo| repo.repo_lifecycle_state == RepoLifecycleState::Idle),
-            repository_count: model.open_repositories().len(),
+            repository_count: model.visible_repositories().len(),
             can_reopen: !model.closed_repositories().is_empty(),
             has_staged: active.is_some_and(|repo| !staged_paths(repo).is_empty()),
             has_branch_pull_request: model.active_branch_pull_request().is_some(),
@@ -476,6 +516,8 @@ impl CommandContext {
             has_pull_requests: model.active_pull_requests().is_some_and(|state| {
                 state.availability == PullRequestsAvailability::Available && !state.pulls.is_empty()
             }),
+            workspace_count: model.workspaces().len(),
+            has_active_workspace: model.active_workspace_id().is_some(),
         }
     }
 }
@@ -515,6 +557,9 @@ impl CommandSpec {
             Command::Shortcut(A::Undo) => needs_repository() && context.can_undo,
             Command::Shortcut(A::Redo) => needs_repository() && context.can_redo,
             Command::Pick(Picker::PullRequest) => mutates() && context.has_pull_requests,
+            Command::Pick(Picker::Workspace) => context.workspace_count > 0,
+            Command::CreateWorkspace => true,
+            Command::RenameWorkspace | Command::DeleteWorkspace => context.has_active_workspace,
             // Sin nada marcado no hay qué guardar ni con qué hacer el fixup.
             Command::StashSelected | Command::Pick(Picker::FixupTarget) => {
                 mutates() && context.has_staged
@@ -589,6 +634,23 @@ pub fn run(command: Command, model: &Entity<AppModel>, cx: &mut App) {
                 }
             }
         }
+        Command::CreateWorkspace => {
+            let initial = model
+                .active_repository()
+                .map(|repo| vec![repo.path.clone()])
+                .unwrap_or_default();
+            model.prompt_create_workspace(initial, cx).detach();
+        }
+        Command::RenameWorkspace => {
+            if let Some(id) = model.active_workspace_id().map(str::to_string) {
+                model.prompt_rename_workspace(&id, cx).detach();
+            }
+        }
+        Command::DeleteWorkspace => {
+            if let Some(id) = model.active_workspace_id().map(str::to_string) {
+                model.confirm_delete_workspace(&id, cx).detach();
+            }
+        }
         Command::Scope(_) | Command::Pick(_) | Command::Sidebar(_) => {}
     });
 }
@@ -645,6 +707,8 @@ mod tests {
             has_pull_requests: false,
             can_undo: false,
             can_redo: false,
+            workspace_count: 0,
+            has_active_workspace: false,
         };
         let idle = CommandContext {
             repository_idle: true,
@@ -710,6 +774,31 @@ mod tests {
         assert!(find("redo").available(CommandContext {
             can_redo: true,
             ..idle
+        }));
+        // Workspaces: crear siempre, cambiar si existe alguno, renombrar/borrar si hay uno activo.
+        assert!(find("create-workspace").available(none));
+        assert!(!find("switch-workspace").available(none));
+        assert!(find("switch-workspace").available(CommandContext {
+            workspace_count: 1,
+            ..none
+        }));
+        assert!(!find("rename-workspace").available(CommandContext {
+            workspace_count: 1,
+            ..none
+        }));
+        assert!(!find("delete-workspace").available(CommandContext {
+            workspace_count: 1,
+            ..none
+        }));
+        assert!(find("rename-workspace").available(CommandContext {
+            workspace_count: 1,
+            has_active_workspace: true,
+            ..none
+        }));
+        assert!(find("delete-workspace").available(CommandContext {
+            workspace_count: 1,
+            has_active_workspace: true,
+            ..none
         }));
     }
 

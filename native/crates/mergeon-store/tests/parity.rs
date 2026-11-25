@@ -125,6 +125,7 @@ fn behaves_like_the_electron_store_for_the_same_operations() {
             repository_workspaces: workspaces,
             open_repositories: vec!["/w/a".into(), "".into(), "  ".into(), "/w/b".into()],
             active_repository_path: Some(" ".into()),
+            ..Default::default()
         })
         .expect("session");
     assert_eq!(json_of(&session), expected["session"]);

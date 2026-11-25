@@ -1396,6 +1396,7 @@ fn setting_the_workspace_session_drops_blank_paths() {
                 "/work/beta".into(),
             ],
             active_repository_path: Some("   ".into()),
+            ..Default::default()
         })
         .expect("set");
 
@@ -1417,6 +1418,7 @@ fn setting_the_workspace_session_drops_blank_paths() {
             repository_workspaces: Map::new(),
             open_repositories: vec!["/work/beta".into()],
             active_repository_path: Some("/work/beta".into()),
+            ..Default::default()
         })
         .expect("set");
     assert_eq!(saved.active_repository_path.as_deref(), Some("/work/beta"));
@@ -1424,6 +1426,54 @@ fn setting_the_workspace_session_drops_blank_paths() {
         fixture.on_disk()["workspaceSession"]["activeRepositoryPath"],
         "/work/beta"
     );
+}
+
+#[test]
+fn workspace_groups_persist_and_validate_without_breaking_legacy_configs() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+
+    let saved = store
+        .set_workspace_session(&WorkspaceSession {
+            open_repositories: vec!["/work/alpha".into(), "/work/beta".into()],
+            active_repository_path: Some("/work/alpha".into()),
+            workspaces: vec![
+                mergeon_store::RepoWorkspace {
+                    id: "ws-work".into(),
+                    name: "  Work  ".into(),
+                    repositories: vec![
+                        "/work/alpha".into(),
+                        " ".into(),
+                        "/work/alpha".into(),
+                        "/work/beta".into(),
+                    ],
+                    active_repository_path: Some("/work/alpha".into()),
+                },
+                mergeon_store::RepoWorkspace {
+                    id: "  ".into(),
+                    name: "Ignored".into(),
+                    repositories: vec![],
+                    active_repository_path: None,
+                },
+            ],
+            active_workspace_id: Some("ws-work".into()),
+            ..Default::default()
+        })
+        .expect("set with workspaces");
+
+    assert_eq!(saved.workspaces.len(), 1);
+    assert_eq!(saved.workspaces[0].name, "Work");
+    assert_eq!(
+        saved.workspaces[0].repositories,
+        vec!["/work/alpha", "/work/beta"]
+    );
+    assert_eq!(saved.active_workspace_id.as_deref(), Some("ws-work"));
+    drop(store);
+
+    let reopened = fixture.open();
+    assert!(reopened.load_report().problems.is_empty());
+    let loaded = reopened.get_workspace_session();
+    assert_eq!(loaded, saved);
 }
 
 #[test]
@@ -1435,6 +1485,7 @@ fn clearing_the_workspace_session_goes_back_to_the_schema_default() {
             repository_workspaces: Map::new(),
             open_repositories: vec!["/work/alpha".into()],
             active_repository_path: Some("/work/alpha".into()),
+            ..Default::default()
         })
         .expect("set");
 
