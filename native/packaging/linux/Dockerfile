@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # corre con el uid del anfitrión para no dejar archivos de root en el repo.
 ARG RUST_TOOLCHAIN=stable
 ENV RUSTUP_HOME=/opt/rustup \
+    RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN \
     PATH=/opt/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | CARGO_HOME=/opt/cargo sh -s -- -y --profile minimal --no-modify-path \

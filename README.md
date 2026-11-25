@@ -14,9 +14,38 @@
 
 *Fast, native, keyboard-friendly Git workflows inspired by Fork — built for Linux, Windows, and macOS.*
 
+<br />
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/commits-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/commits-light.png" />
+  <img src="docs/screenshots/commits-dark.png" alt="Mergeon commit graph and history view" width="100%" />
+</picture>
+
 </div>
 
 ---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/screenshots/changes-dark.png" alt="Mergeon Local Changes and syntax-highlighted diff" />
+      <br /><sub><b>Local Changes & Diff</b> — Stage/unstage by file, hunk, or line with syntax-highlighted diffs</sub>
+    </td>
+    <td width="50%">
+      <img src="docs/screenshots/palette-dark.png" alt="Mergeon Command Palette" />
+      <br /><sub><b>Command Palette (<code>Ctrl+Shift+P</code>)</b> — Jump to commands, <code>@branches</code>, <code>#repos</code>, and <code>/files</code></sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="docs/screenshots/commits-light.png" alt="Mergeon Light Theme" />
+      <br /><sub><b>Light & Dark Themes</b> — Crisp native GPU-rendered UI with visual branch graph</sub>
+    </td>
+  </tr>
+</table>
 
 ## Features
 
