@@ -6,7 +6,7 @@
 //! Ya no hay barra de actividad lateral: sus botones caben en la barra de
 //! título y la app gana 48px de ancho en todas las vistas.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use gpui_kit::Focusable as _;
@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 use mergeon_app::shell::WindowRequest;
 use mergeon_app::{AppEvent, AppModel, RepositoryTabLabel};
-use mergeon_model::keyboard_shortcuts::ShortcutAction;
+use mergeon_model::keyboard_shortcuts::{ShortcutAction, effective_combo_label};
 use mergeon_ui::menu::{MenuItem, MenuTriggerExt as _};
 use mergeon_ui::style::text;
 use mergeon_ui::{
@@ -160,7 +160,11 @@ type ModelAction = Rc<dyn Fn(&mut AppModel, &mut Context<AppModel>)>;
 type TabCloseHandler = Rc<dyn Fn(&mut AppShell, &mut Context<AppShell>)>;
 
 /// Menú contextual de una pestaña de repositorio.
-fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec<MenuItem> {
+fn repository_tab_menu(
+    model: &Entity<AppModel>,
+    tab: &RepositoryTabMenu,
+    shortcuts: &BTreeMap<String, String>,
+) -> Vec<MenuItem> {
     let action = |run: ModelAction| {
         let model = model.clone();
         move |_: &mut Window, cx: &mut gpui_kit::App| {
@@ -207,14 +211,19 @@ fn repository_tab_menu(model: &Entity<AppModel>, tab: &RepositoryTabMenu) -> Vec
             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
         }
     };
-    // `mod+w` cierra documentos; el repositorio, `mod+shift+w`.
-    let close_shortcut =
-        mergeon_model::keyboard_shortcuts::combo_label("mod+shift+w", cfg!(target_os = "macos"));
+    // `mod+w` cierra documentos; el repositorio, `mod+shift+w` (o lo que el
+    // usuario haya configurado).
+    let close_shortcut = effective_combo_label(
+        ShortcutAction::CloseRepository,
+        shortcuts,
+        cfg!(target_os = "macos"),
+    );
+    let mut close_item = MenuItem::new("Close").icon(Lucide::X).on_click(close);
+    if let Some(shortcut) = close_shortcut {
+        close_item = close_item.shortcut(shortcut);
+    }
     vec![
-        MenuItem::new("Close")
-            .icon(Lucide::X)
-            .shortcut(close_shortcut)
-            .on_click(close),
+        close_item,
         MenuItem::new("Close others")
             .disabled(tab.is_only)
             .on_click(close_others),
@@ -308,6 +317,7 @@ struct ShellState {
     restoring: bool,
     unseen_errors: bool,
     update_status: UpdateStatus,
+    keyboard_shortcuts: BTreeMap<String, String>,
 }
 
 impl ShellState {
@@ -344,6 +354,7 @@ impl ShellState {
             restoring: model.is_restoring_workspace(),
             unseen_errors: model.operations_log().unseen_errors > 0,
             update_status: model.updater_state().status,
+            keyboard_shortcuts: model.keyboard_shortcuts().clone(),
         }
     }
 }
@@ -402,6 +413,10 @@ impl AppShell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let model = AppModel::global(cx);
         cx.set_global(ShellHandle(cx.entity().downgrade()));
+        let initial_shortcuts = model.read(cx).keyboard_shortcuts().clone();
+        if !initial_shortcuts.is_empty() {
+            crate::rebind_shortcuts(&initial_shortcuts, cx);
+        }
         let sidebar = cx.new(|cx| Sidebar::new(window, cx));
         let home = cx.new(|cx| HomeView::new(window, cx));
         let settings = cx.new(|cx| SettingsView::new(window, cx));
@@ -486,14 +501,17 @@ impl AppShell {
     fn palette_entries(&self, cx: &gpui_kit::App) -> Vec<PaletteEntry> {
         let model = self.model.read(cx);
         let context = CommandContext::read(model);
+        let skip_action_dialogs = model.skip_action_dialogs();
+        let shortcuts = model.keyboard_shortcuts();
         let mut entries: Vec<PaletteEntry> = COMMANDS
             .iter()
+            .filter(|spec| spec.visible(skip_action_dialogs))
             .map(|spec| PaletteEntry {
                 kind: PaletteKind::Command,
                 icon: spec.icon,
-                label: spec.label.into(),
+                label: spec.display_label(skip_action_dialogs).into(),
                 context: spec.group.into(),
-                shortcut: spec.shortcut_label().map(Into::into),
+                shortcut: spec.shortcut_label_with(shortcuts).map(Into::into),
                 enabled: spec.available(context),
                 action: PaletteAction::Command(spec.command),
             })
@@ -1055,6 +1073,10 @@ impl AppShell {
                 };
                 mergeon_ui::theme::apply(preference, cx);
             }
+            AppEvent::ShortcutsChanged => {
+                let overrides = self.model.read(cx).keyboard_shortcuts().clone();
+                crate::rebind_shortcuts(&overrides, cx);
+            }
             AppEvent::ShowDialog(request) => {
                 views::open_dialog(request, window, cx);
             }
@@ -1196,10 +1218,23 @@ impl AppShell {
             self.shown.update_status,
             UpdateStatus::Available | UpdateStatus::Downloading | UpdateStatus::Downloaded
         );
-        let modifier = if cfg!(target_os = "macos") {
-            "Cmd"
+        let is_mac = cfg!(target_os = "macos");
+        let shortcuts = &self.shown.keyboard_shortcuts;
+        let ops_log_tooltip = tooltip_with_shortcut(
+            "Operation log",
+            ShortcutAction::ShowOperationsLog,
+            shortcuts,
+            is_mac,
+        );
+        let settings_tooltip = if has_update {
+            "Settings · Update available".to_string()
         } else {
-            "Ctrl"
+            tooltip_with_shortcut(
+                "Settings",
+                ShortcutAction::OpenPreferences,
+                shortcuts,
+                is_mac,
+            )
         };
         div()
             .flex()
@@ -1211,7 +1246,7 @@ impl AppShell {
                 TitleBarButton {
                     id: "titlebar-operations-log",
                     icon: Lucide::RotateCcwClock,
-                    tooltip: format!("Operation log ({modifier}+Shift+L)").into(),
+                    tooltip: ops_log_tooltip.into(),
                     active: false,
                     dot: unseen_errors.then_some(palette.destructive.into()),
                 },
@@ -1226,11 +1261,7 @@ impl AppShell {
                 TitleBarButton {
                     id: "titlebar-settings",
                     icon: Lucide::Settings,
-                    tooltip: if has_update {
-                        "Settings · Update available".into()
-                    } else {
-                        format!("Settings ({modifier}+,)").into()
-                    },
+                    tooltip: settings_tooltip.into(),
                     active: settings_open,
                     dot: has_update.then_some(palette.primary.into()),
                 },
@@ -1449,7 +1480,10 @@ impl AppShell {
                     });
                 }),
             )
-            .context_menu_items(move |_, _| repository_tab_menu(&model, &repository))
+            .context_menu_items(move |_, cx| {
+                let shortcuts = model.read(cx).keyboard_shortcuts().clone();
+                repository_tab_menu(&model, &repository, &shortcuts)
+            })
             .into_any_element()
     }
 
@@ -1657,16 +1691,17 @@ impl AppShell {
             )
         });
 
-        let modifier = if cfg!(target_os = "macos") {
-            "Cmd"
-        } else {
-            "Ctrl"
-        };
+        let open_repository_tooltip = tooltip_with_shortcut(
+            "Open repository",
+            ShortcutAction::OpenRepository,
+            &self.shown.keyboard_shortcuts,
+            cfg!(target_os = "macos"),
+        );
         let open_repository = self.title_bar_button(
             TitleBarButton {
                 id: "titlebar-open-repository",
                 icon: Lucide::Plus,
-                tooltip: format!("Open repository ({modifier}+O)").into(),
+                tooltip: open_repository_tooltip.into(),
                 active: false,
                 dot: None,
             },
@@ -1756,6 +1791,18 @@ impl AppShell {
             .child(workspace)
             .child(self.status_bar.clone())
             .into_any_element()
+    }
+}
+
+fn tooltip_with_shortcut(
+    label: &str,
+    action: ShortcutAction,
+    shortcuts: &BTreeMap<String, String>,
+    is_mac: bool,
+) -> String {
+    match effective_combo_label(action, shortcuts, is_mac) {
+        Some(keys) => format!("{label} ({keys})"),
+        None => label.to_string(),
     }
 }
 

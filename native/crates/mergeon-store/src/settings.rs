@@ -4,6 +4,8 @@
 //! original conserva: cualquier clave que no conoce pasa tal cual (por ejemplo
 //! `autoFetchIntervalMinutes`, que el renderer guarda y `store.js` no declara).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -126,6 +128,33 @@ pub const CHANGES_LIST_LAYOUT_KEY: &str = "changesListLayout";
 /// la lista de cambios.
 pub const CHANGES_HINTS_DISMISSED_KEY: &str = "changesHintsDismissed";
 
+/// Clave de [`Settings::skip_action_dialogs`] dentro de `settings`.
+pub const SKIP_ACTION_DIALOGS_KEY: &str = "skipActionDialogs";
+/// Clave de [`Settings::keyboard_shortcuts`] dentro de `settings`.
+pub const KEYBOARD_SHORTCUTS_KEY: &str = "keyboardShortcuts";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+pub(crate) fn normalize_keyboard_shortcuts(value: &Value) -> BTreeMap<String, String> {
+    let Some(map) = value.as_object() else {
+        return BTreeMap::new();
+    };
+    let mut normalized = BTreeMap::new();
+    for (key, value) in map {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let Some(combo) = value.as_str() else {
+            continue;
+        };
+        normalized.insert(key.to_string(), combo.trim().to_ascii_lowercase());
+    }
+    normalized
+}
+
 pub(crate) fn normalize_settings(settings: Option<&Value>) -> Value {
     let mut normalized = object_of(default_settings());
     spread(&mut normalized, settings);
@@ -149,6 +178,24 @@ pub(crate) fn normalize_settings(settings: Option<&Value>) -> Value {
             EXTERNAL_EDITOR_KEY.into(),
             serde_json::to_value(ExternalEditorSettings::from_value(editor)).unwrap_or(Value::Null),
         );
+    }
+    if let Some(skip) = prop(settings, SKIP_ACTION_DIALOGS_KEY) {
+        if js_truthy(skip) {
+            normalized.insert(SKIP_ACTION_DIALOGS_KEY.into(), Value::Bool(true));
+        } else {
+            normalized.remove(SKIP_ACTION_DIALOGS_KEY);
+        }
+    }
+    if let Some(shortcuts) = prop(settings, KEYBOARD_SHORTCUTS_KEY) {
+        let cleaned = normalize_keyboard_shortcuts(shortcuts);
+        if cleaned.is_empty() {
+            normalized.remove(KEYBOARD_SHORTCUTS_KEY);
+        } else {
+            normalized.insert(
+                KEYBOARD_SHORTCUTS_KEY.into(),
+                serde_json::to_value(cleaned).unwrap_or(Value::Null),
+            );
+        }
     }
     Value::Object(normalized)
 }
@@ -492,6 +539,13 @@ pub struct Settings {
     /// Editor externo. No está en los defaults: sin la clave vale `auto`.
     #[serde(skip_serializing_if = "ExternalEditorSettings::is_default")]
     pub external_editor: ExternalEditorSettings,
+    /// Ejecutar Fetch / Pull / Push sin diálogo de confirmación cuando existen
+    /// valores seguros por defecto.
+    #[serde(skip_serializing_if = "is_false")]
+    pub skip_action_dialogs: bool,
+    /// Atajos de teclado personalizados (`action_id -> combo`, `""` = sin asignar).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keyboard_shortcuts: BTreeMap<String, String>,
     /// Claves que este tipo no conoce; se conservan.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -508,13 +562,15 @@ impl Default for Settings {
             sidebar_sections: SidebarSections::default(),
             commit_view: CommitViewSettings::default(),
             external_editor: ExternalEditorSettings::default(),
+            skip_action_dialogs: false,
+            keyboard_shortcuts: BTreeMap::new(),
             extra: Map::new(),
         }
     }
 }
 
 impl Settings {
-    const KNOWN: [&'static str; 8] = [
+    const KNOWN: [&'static str; 10] = [
         "theme",
         "autoFetch",
         "autoFetchIntervalMinutes",
@@ -523,6 +579,8 @@ impl Settings {
         "sidebarSections",
         "commitView",
         EXTERNAL_EDITOR_KEY,
+        SKIP_ACTION_DIALOGS_KEY,
+        KEYBOARD_SHORTCUTS_KEY,
     ];
 
     /// Lectura tolerante de unos ajustes en JSON. Interpreta cada campo como lo
@@ -553,6 +611,10 @@ impl Settings {
                 .unwrap_or_default(),
             external_editor: prop(value, EXTERNAL_EDITOR_KEY)
                 .map(ExternalEditorSettings::from_value)
+                .unwrap_or_default(),
+            skip_action_dialogs: bool_or(prop(value, SKIP_ACTION_DIALOGS_KEY), false),
+            keyboard_shortcuts: prop(value, KEYBOARD_SHORTCUTS_KEY)
+                .map(normalize_keyboard_shortcuts)
                 .unwrap_or_default(),
             extra: take_extra(value, &Self::KNOWN),
         }
@@ -613,6 +675,10 @@ pub struct SettingsUpdate {
     /// Reemplaza el editor externo entero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_editor: Option<ExternalEditorSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_action_dialogs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyboard_shortcuts: Option<BTreeMap<String, String>>,
     /// Otras claves a guardar tal cual.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -992,5 +1058,50 @@ mod tests {
             serde_json::to_value(&settings).unwrap()[EXTERNAL_EDITOR_KEY],
             json!({ "editor": "vscode", "customCommand": "", "customArgs": "" })
         );
+    }
+
+    #[test]
+    fn skip_action_dialogs_and_keyboard_shortcuts_are_optional_and_normalized() {
+        assert!(!Settings::default().skip_action_dialogs);
+        assert!(Settings::default().keyboard_shortcuts.is_empty());
+        let default_json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(default_json.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert!(default_json.get(KEYBOARD_SHORTCUTS_KEY).is_none());
+
+        let normalized = normalize_settings(Some(&json!({
+            "skipActionDialogs": true,
+            "keyboardShortcuts": {
+                " fetch ": "  Mod+Shift+Down ",
+                "pull": "",
+                "": "mod+x",
+                "bad": 123
+            }
+        })));
+        assert_eq!(normalized[SKIP_ACTION_DIALOGS_KEY], json!(true));
+        assert_eq!(
+            normalized[KEYBOARD_SHORTCUTS_KEY],
+            json!({ "fetch": "mod+shift+down", "pull": "" })
+        );
+
+        let settings = Settings::from_value(&normalized);
+        assert!(settings.skip_action_dialogs);
+        assert_eq!(
+            settings.keyboard_shortcuts.get("fetch").map(String::as_str),
+            Some("mod+shift+down")
+        );
+        assert_eq!(
+            settings.keyboard_shortcuts.get("pull").map(String::as_str),
+            Some("")
+        );
+        assert!(!settings.extra.contains_key(SKIP_ACTION_DIALOGS_KEY));
+        assert!(!settings.extra.contains_key(KEYBOARD_SHORTCUTS_KEY));
+
+        // Resetting back to defaults omits the keys cleanly.
+        let cleared = merge_settings_update(
+            &normalized,
+            &json!({ "skipActionDialogs": false, "keyboardShortcuts": {} }),
+        );
+        assert!(cleared.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert!(cleared.get(KEYBOARD_SHORTCUTS_KEY).is_none());
     }
 }

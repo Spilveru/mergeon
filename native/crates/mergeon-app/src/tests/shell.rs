@@ -717,3 +717,211 @@ async fn reloading_the_application_restores_the_session_from_scratch(cx: &mut Te
         assert_eq!(model.active_status_watch_path(), Some(repo_id.as_str()));
     });
 }
+
+#[gpui_kit::test]
+async fn direct_fetch_pull_push_execute_without_dialogs_and_fall_back_when_unsafe(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+    assert!(app.backend.storage().get_settings().skip_action_dialogs);
+
+    // 1. Repository with NO remotes: Fetch, Pull, and Push all fall back to dialogs.
+    let no_remote = TestRepo::new();
+    app.open(&no_remote, cx).await;
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Fetch, cx);
+        model.handle_shortcut(ShortcutAction::Pull, cx);
+        model.handle_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialogs(&app),
+        [
+            DialogRequest::Fetch,
+            DialogRequest::Pull,
+            DialogRequest::Push
+        ]
+    );
+
+    // 2. Repository WITH origin and upstream: Fetch, Pull, and Push all execute directly.
+    let synced = TestRepo::new();
+    let origin = synced.add_bare_remote("origin");
+    synced.git(&["push", "-q", "-u", "origin", "main"]);
+    synced.commit_file("ahead.txt", "local\n", "Local commit");
+    app.open(&synced, cx).await;
+    app.clear_events();
+
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Fetch, cx)
+    });
+    app.wait_for(cx, "direct fetch recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("fetch"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    let local_head = synced.head();
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Push, cx)
+    });
+    app.wait_for(cx, "direct push updated origin", |_| {
+        super::support::git_in(&origin, &["rev-parse", "main"]).trim() == local_head
+    });
+    assert!(dialogs(&app).is_empty());
+
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Pull, cx)
+    });
+    app.wait_for(cx, "direct pull recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("pull"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    // 3. Local-only branch without upstream or matching remote branch:
+    //    Pull and Push fall back to dialogs, while Fetch still runs directly.
+    synced.git(&["checkout", "-q", "-b", "topic"]);
+    let repo_id = app
+        .model
+        .read_with(cx, |model, _| model.active_repository().unwrap().id.clone());
+    app.model
+        .update(cx, |model, cx| {
+            model.sync_repository_read_model(
+                repo_id.as_str(),
+                crate::SyncRequest::new()
+                    .status(true)
+                    .branches(true)
+                    .remotes(true),
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+    app.clear_events();
+
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Pull, cx);
+        model.handle_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(dialogs(&app), [DialogRequest::Pull, DialogRequest::Push]);
+
+    // 4. Detached HEAD: Pull and Push fall back to dialogs.
+    synced.git(&["checkout", "-q", "--detach"]);
+    app.model
+        .update(cx, |model, cx| {
+            model.sync_repository_read_model(
+                repo_id.as_str(),
+                crate::SyncRequest::new()
+                    .status(true)
+                    .branches(true)
+                    .remotes(true),
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+    app.clear_events();
+
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::Pull, cx);
+        model.handle_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(dialogs(&app), [DialogRequest::Pull, DialogRequest::Push]);
+}
+
+#[gpui_kit::test]
+async fn custom_keyboard_shortcuts_persist_emit_events_and_reset(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    app.clear_events();
+
+    // OpenShortcutsHelp opens Settings → Shortcuts.
+    app.model.update(cx, |model, cx| {
+        model.handle_shortcut(ShortcutAction::OpenShortcutsHelp, cx);
+    });
+    assert!(app.events().contains(&AppEvent::OpenSettings {
+        section: "shortcuts".to_string()
+    }));
+
+    app.clear_events();
+    app.model
+        .update(cx, |model, cx| {
+            model.set_keyboard_shortcut(ShortcutAction::Fetch, "ctrl+shift+down", cx)
+        })
+        .await;
+    assert!(app.events().contains(&AppEvent::ShortcutsChanged));
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model
+            .keyboard_shortcuts()
+            .get("fetch")
+            .cloned()),
+        Some("ctrl+shift+down".to_string())
+    );
+    assert_eq!(
+        app.backend
+            .storage()
+            .get_settings()
+            .keyboard_shortcuts
+            .get("fetch")
+            .map(String::as_str),
+        Some("ctrl+shift+down")
+    );
+
+    // Unbind Pull with empty string.
+    app.model
+        .update(cx, |model, cx| {
+            model.set_keyboard_shortcut(ShortcutAction::Pull, "", cx)
+        })
+        .await;
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model
+            .keyboard_shortcuts()
+            .get("pull")
+            .cloned()),
+        Some(String::new())
+    );
+
+    // Reset single action.
+    app.model
+        .update(cx, |model, cx| {
+            model.reset_keyboard_shortcut(ShortcutAction::Fetch, cx)
+        })
+        .await;
+    assert!(!app.model.read_with(cx, |model, _| {
+        model.keyboard_shortcuts().contains_key("fetch")
+    }));
+    assert!(app.model.read_with(cx, |model, _| {
+        model.keyboard_shortcuts().contains_key("pull")
+    }));
+
+    // Reset all omits the key from persisted settings.
+    app.model
+        .update(cx, |model, cx| model.reset_all_keyboard_shortcuts(cx))
+        .await;
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.keyboard_shortcuts().is_empty())
+    );
+    assert!(
+        app.backend
+            .storage()
+            .get_settings()
+            .keyboard_shortcuts
+            .is_empty()
+    );
+}

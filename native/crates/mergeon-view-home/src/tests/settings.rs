@@ -328,3 +328,108 @@ async fn offers_a_manual_download_when_the_platform_cannot_install_automatically
             .any(|arg| arg == "https://example.com/releases/latest")
     );
 }
+
+#[gpui_kit::test]
+async fn shortcuts_section_records_detects_conflicts_resets_and_syncs_help(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::test::TestWindowExt as _;
+
+    let (app, _updater, view) = settings("shortcuts", cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.section(), SettingsSection::Shortcuts)
+    });
+    assert!(app.exists(cx, "shortcuts-panel"));
+    assert!(app.exists(cx, "shortcut-row-fetch"));
+    assert!(app.exists(cx, "shortcut-row-pull"));
+    assert!(!app.exists(cx, "shortcuts-conflict-banner"));
+
+    // Click to record Fetch, press Escape to cancel without changing it.
+    app.click(cx, "shortcut-record-fetch");
+    assert_eq!(
+        app.label(cx, "shortcut-record-fetch").as_deref(),
+        Some("Press keys…")
+    );
+    app.in_window(cx, |window, cx| window.press("escape", cx));
+    app.settle(cx);
+    assert_ne!(
+        app.label(cx, "shortcut-record-fetch").as_deref(),
+        Some("Press keys…")
+    );
+
+    // Record an invalid bare key -> shows error and stays recording.
+    app.click(cx, "shortcut-record-fetch");
+    app.in_window(cx, |window, cx| window.press("a", cx));
+    app.settle(cx);
+    assert!(app.exists(cx, "shortcuts-recording-error"));
+    assert_eq!(
+        app.label(cx, "shortcut-record-fetch").as_deref(),
+        Some("Press keys…")
+    );
+
+    // Record a valid shortcut with an arrow key (`secondary-shift-down`).
+    app.in_window(cx, |window, cx| window.press("secondary-shift-down", cx));
+    app.settle(cx);
+    assert!(!app.exists(cx, "shortcuts-recording-error"));
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model
+            .keyboard_shortcuts()
+            .get("fetch")
+            .cloned()),
+        Some("mod+shift+down".to_string())
+    );
+    assert_eq!(
+        app.backend
+            .storage()
+            .get_settings()
+            .keyboard_shortcuts
+            .get("fetch")
+            .map(String::as_str),
+        Some("mod+shift+down")
+    );
+
+    // Switch to Help and verify the cheatsheet reflects the customized Fetch shortcut.
+    app.click(cx, "help");
+    let expected_fetch = mergeon_app::model_types::keyboard_shortcuts::combo_label(
+        "mod+shift+down",
+        cfg!(target_os = "macos"),
+    );
+    assert_eq!(
+        app.label(cx, "Fetch").as_deref(),
+        Some(format!("Fetch: {expected_fetch}").as_str())
+    );
+
+    // Back to Shortcuts: create a conflict by binding Pull to Fetch's custom combo.
+    app.click(cx, "shortcuts");
+    app.click(cx, "shortcut-record-pull");
+    app.in_window(cx, |window, cx| window.press("secondary-shift-down", cx));
+    app.settle(cx);
+    assert!(app.exists(cx, "shortcuts-conflict-banner"));
+    assert!(app.exists(cx, "shortcut-conflict-fetch"));
+    assert!(app.exists(cx, "shortcut-conflict-pull"));
+
+    // Clear (unbind) Pull via Backspace during recording.
+    app.click(cx, "shortcut-record-pull");
+    app.in_window(cx, |window, cx| window.press("backspace", cx));
+    app.settle(cx);
+    assert_eq!(
+        app.label(cx, "shortcut-record-pull").as_deref(),
+        Some("Unassigned")
+    );
+    assert!(!app.exists(cx, "shortcuts-conflict-banner"));
+
+    // Reset Fetch individually, then Reset all to restore Pull too.
+    app.click(cx, "shortcut-reset-fetch");
+    assert!(!app.model.read_with(cx, |model, _| {
+        model.keyboard_shortcuts().contains_key("fetch")
+    }));
+    assert!(app.model.read_with(cx, |model, _| {
+        model.keyboard_shortcuts().contains_key("pull")
+    }));
+
+    app.click(cx, "shortcuts-reset-all");
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.keyboard_shortcuts().is_empty())
+    );
+}

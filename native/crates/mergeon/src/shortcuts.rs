@@ -3,10 +3,12 @@
 //! traducen a bindings de GPUI y se aplican las mismas guardas del original
 //! (diálogo abierto, foco en un campo de texto).
 
-use gpui_kit::{App, KeyBinding, Window, actions};
+use std::collections::BTreeMap;
+
+use gpui_kit::{App, KeyBinding, Keystroke, Window, actions};
 use mergeon_app::AppModel;
 use mergeon_model::keyboard_shortcuts::{
-    APP_SHORTCUTS, ShortcutAction, ShortcutBinding, WORKSPACE_SHORTCUTS,
+    APP_SHORTCUTS, ShortcutAction, ShortcutBinding, WORKSPACE_SHORTCUTS, effective_combos_for,
 };
 
 actions!(
@@ -81,6 +83,13 @@ fn focus_is_editable(window: &Window) -> bool {
         .any(|context| context.contains("Input"))
 }
 
+fn focus_is_shortcut_recorder(window: &Window) -> bool {
+    window
+        .context_stack()
+        .iter()
+        .any(|context| context.contains(mergeon_view_home::SHORTCUT_RECORDER_CONTEXT))
+}
+
 fn run(action: ShortcutAction, cx: &mut App) {
     log::debug!("atajo {action:?}");
     // La acción llega desde dentro del despacho de la pulsación, con la
@@ -104,6 +113,9 @@ fn run_now(action: ShortcutAction, cx: &mut App) {
         return;
     };
     let allowed = window.update(cx, |_, window, cx| {
+        if focus_is_shortcut_recorder(window) {
+            return false;
+        }
         let dialog_open = mergeon_ui::dialog::open_count(window, cx) > 0;
         let editable = focus_is_editable(window);
         log::debug!("atajo {action:?}: diálogo={dialog_open} editable={editable}");
@@ -137,27 +149,83 @@ fn run_now(action: ShortcutAction, cx: &mut App) {
     }
 }
 
-macro_rules! register {
-    ($cx:expr, $( $gpui_action:ident => $action:expr ),+ $(,)?) => {{
+macro_rules! for_all_shortcuts {
+    ($macro:ident, $cx:expr $(, $extra:expr)*) => {
+        $macro!($cx $(, $extra)*;
+            OpenRepository => ShortcutAction::OpenRepository,
+            CloneFromGitHub => ShortcutAction::CloneFromGitHub,
+            CloneFromUrl => ShortcutAction::CloneFromUrl,
+            Fetch => ShortcutAction::Fetch,
+            Pull => ShortcutAction::Pull,
+            Push => ShortcutAction::Push,
+            NewBranch => ShortcutAction::NewBranch,
+            ReloadApplication => ShortcutAction::ReloadApplication,
+            Quit => ShortcutAction::Quit,
+            MinimizeWindow => ShortcutAction::MinimizeWindow,
+            ToggleDevTools => ShortcutAction::ToggleDevTools,
+            ShowCommitsView => ShortcutAction::ShowCommitsView,
+            ShowChangesView => ShortcutAction::ShowChangesView,
+            SearchCommits => ShortcutAction::SearchCommits,
+            ShowOperationsLog => ShortcutAction::ShowOperationsLog,
+            ShowReflog => ShortcutAction::ShowReflog,
+            OpenInEditor => ShortcutAction::OpenInEditor,
+            OpenPreferences => ShortcutAction::OpenPreferences,
+            OpenShortcutsHelp => ShortcutAction::OpenShortcutsHelp,
+            CloseTab => ShortcutAction::CloseTab,
+            CloseRepository => ShortcutAction::CloseRepository,
+            ReopenClosedRepository => ShortcutAction::ReopenClosedRepository,
+            NextRepositoryTab => ShortcutAction::NextRepositoryTab,
+            PreviousRepositoryTab => ShortcutAction::PreviousRepositoryTab,
+            NextDocumentTab => ShortcutAction::NextDocumentTab,
+            PreviousDocumentTab => ShortcutAction::PreviousDocumentTab,
+            SelectRepositoryTab1 => ShortcutAction::SelectRepositoryTab(1),
+            SelectRepositoryTab2 => ShortcutAction::SelectRepositoryTab(2),
+            SelectRepositoryTab3 => ShortcutAction::SelectRepositoryTab(3),
+            SelectRepositoryTab4 => ShortcutAction::SelectRepositoryTab(4),
+            SelectRepositoryTab5 => ShortcutAction::SelectRepositoryTab(5),
+            SelectRepositoryTab6 => ShortcutAction::SelectRepositoryTab(6),
+            SelectRepositoryTab7 => ShortcutAction::SelectRepositoryTab(7),
+            SelectRepositoryTab8 => ShortcutAction::SelectRepositoryTab(8),
+            SelectRepositoryTab9 => ShortcutAction::SelectRepositoryTab(9),
+            OpenCommandPalette => ShortcutAction::OpenCommandPalette,
+            UndoGitOperation => ShortcutAction::Undo,
+            RedoGitOperation => ShortcutAction::Redo,
+        )
+    };
+}
+
+macro_rules! register_handlers {
+    ($cx:expr; $( $gpui_action:ident => $action:expr ),+ $(,)?) => {{
+        $(
+            $cx.on_action(|_: &$gpui_action, cx| run($action, cx));
+        )+
+    }};
+}
+
+macro_rules! bind_effective_keys {
+    ($cx:expr, $overrides:expr; $( $gpui_action:ident => $action:expr ),+ $(,)?) => {{
         let mut bindings = Vec::new();
         $(
-            for binding in bindings_for($action) {
-                // Sin contexto (`None`) para que funcionen incluso sin foco en
-                // la ventana; `init_bindings` llama a `shortcuts::init` antes
-                // que `mergeon_ui::init` y las vistas para que los contextos
-                // específicos (`Input`, `DiffViewer`…) ganen en el desempate.
-                bindings.push(KeyBinding::new(
-                    &keystroke(binding.combo),
-                    $gpui_action,
-                    None,
-                ));
+            for combo in effective_combos_for($action, $overrides) {
+                let ks = keystroke(&combo);
+                if Keystroke::parse(&ks).is_ok() {
+                    // Sin contexto (`None`) para que funcionen incluso sin foco en
+                    // la ventana; `init_bindings` / `rebind_shortcuts` llaman a
+                    // `shortcuts::bind_keys` antes que `mergeon_ui::init` y las
+                    // vistas para que los contextos específicos (`Input`,
+                    // `DiffViewer`, `CommitMessage`…) ganen en el desempate.
+                    bindings.push(KeyBinding::new(&ks, $gpui_action, None));
+                } else {
+                    log::warn!("atajo inválido ignorado para {:?}: {:?}", $action, combo);
+                }
             }
-            $cx.on_action(|_: &$gpui_action, cx| run($action, cx));
         )+
         $cx.bind_keys(bindings);
     }};
 }
 
+/// Registra los manejadores de acciones globales una vez y aplica los bindings
+/// por defecto.
 pub fn init(cx: &mut App) {
     // `RUST_LOG=mergeon=trace`: cada pulsación, con la acción que resolvió y
     // el contexto de foco (para depurar atajos que "no hacen nada").
@@ -172,46 +240,14 @@ pub fn init(cx: &mut App) {
         })
         .detach();
     }
-    register!(cx,
-        OpenRepository => ShortcutAction::OpenRepository,
-        CloneFromGitHub => ShortcutAction::CloneFromGitHub,
-        CloneFromUrl => ShortcutAction::CloneFromUrl,
-        Fetch => ShortcutAction::Fetch,
-        Pull => ShortcutAction::Pull,
-        Push => ShortcutAction::Push,
-        NewBranch => ShortcutAction::NewBranch,
-        ReloadApplication => ShortcutAction::ReloadApplication,
-        Quit => ShortcutAction::Quit,
-        MinimizeWindow => ShortcutAction::MinimizeWindow,
-        ToggleDevTools => ShortcutAction::ToggleDevTools,
-        ShowCommitsView => ShortcutAction::ShowCommitsView,
-        ShowChangesView => ShortcutAction::ShowChangesView,
-        SearchCommits => ShortcutAction::SearchCommits,
-        ShowOperationsLog => ShortcutAction::ShowOperationsLog,
-        ShowReflog => ShortcutAction::ShowReflog,
-        OpenInEditor => ShortcutAction::OpenInEditor,
-        OpenPreferences => ShortcutAction::OpenPreferences,
-        OpenShortcutsHelp => ShortcutAction::OpenShortcutsHelp,
-        CloseTab => ShortcutAction::CloseTab,
-        CloseRepository => ShortcutAction::CloseRepository,
-        ReopenClosedRepository => ShortcutAction::ReopenClosedRepository,
-        NextRepositoryTab => ShortcutAction::NextRepositoryTab,
-        PreviousRepositoryTab => ShortcutAction::PreviousRepositoryTab,
-        NextDocumentTab => ShortcutAction::NextDocumentTab,
-        PreviousDocumentTab => ShortcutAction::PreviousDocumentTab,
-        SelectRepositoryTab1 => ShortcutAction::SelectRepositoryTab(1),
-        SelectRepositoryTab2 => ShortcutAction::SelectRepositoryTab(2),
-        SelectRepositoryTab3 => ShortcutAction::SelectRepositoryTab(3),
-        SelectRepositoryTab4 => ShortcutAction::SelectRepositoryTab(4),
-        SelectRepositoryTab5 => ShortcutAction::SelectRepositoryTab(5),
-        SelectRepositoryTab6 => ShortcutAction::SelectRepositoryTab(6),
-        SelectRepositoryTab7 => ShortcutAction::SelectRepositoryTab(7),
-        SelectRepositoryTab8 => ShortcutAction::SelectRepositoryTab(8),
-        SelectRepositoryTab9 => ShortcutAction::SelectRepositoryTab(9),
-        OpenCommandPalette => ShortcutAction::OpenCommandPalette,
-        UndoGitOperation => ShortcutAction::Undo,
-        RedoGitOperation => ShortcutAction::Redo,
-    );
+    for_all_shortcuts!(register_handlers, cx);
+    bind_keys(cx, &BTreeMap::new());
+}
+
+/// Registra únicamente los `KeyBinding` globales aplicando los overrides del
+/// usuario (tras `cx.clear_key_bindings()` en caliente).
+pub fn bind_keys(cx: &mut App, overrides: &BTreeMap<String, String>) {
+    for_all_shortcuts!(bind_effective_keys, cx, overrides);
 }
 
 #[cfg(test)]
@@ -499,5 +535,75 @@ mod tests {
         for binding in APP_SHORTCUTS.iter().chain(WORKSPACE_SHORTCUTS.iter()) {
             assert!(binding_for(binding.action).is_some());
         }
+    }
+
+    #[gpui_kit::test]
+    async fn live_rebinding_applies_custom_shortcuts_and_preserves_input_precedence(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, WindowOptions};
+        use mergeon_ui::InputState;
+
+        struct WithInput {
+            input: gpui_kit::Entity<InputState>,
+        }
+        impl gpui_kit::Render for WithInput {
+            fn render(
+                &mut self,
+                _: &mut Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                mergeon_ui::input(&self.input)
+            }
+        }
+
+        cx.executor().allow_parking();
+        let (backend, events) = mergeon_app::testing::TestBackend::new().build();
+        let model = cx.update(|cx| {
+            crate::init_bindings(cx);
+            AppModel::init(backend, events, cx)
+        });
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                cx.new(|_| WithInput { input })
+            })
+            .expect("ventana de prueba")
+        });
+
+        // Rebind OpenPreferences from `mod+,` to `f9` live at runtime.
+        let mut overrides = BTreeMap::new();
+        overrides.insert("openPreferences".to_string(), "f9".to_string());
+        cx.update(|cx| crate::rebind_shortcuts(&overrides, cx));
+
+        // Old shortcut (`secondary-,`) no longer triggers OpenPreferences.
+        cx.simulate_keystrokes(window, "secondary-,");
+        cx.run_until_parked();
+        assert!(!model.read_with(cx, |model, _| model.show_preferences()));
+
+        // New shortcut (`f9`) opens Preferences immediately.
+        cx.simulate_keystrokes(window, "f9");
+        cx.run_until_parked();
+        assert!(model.read_with(cx, |model, _| model.show_preferences()));
+
+        // Input bindings (Ctrl+Z) still win inside an Input after rebinding.
+        cx.update_window(window, |_, window, cx| {
+            let input = view.read(cx).input.clone();
+            input.update(cx, |input, cx| input.focus(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes(window, "x y");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.input.read(cx).value().to_string()),
+            "xy"
+        );
+        cx.simulate_keystrokes(window, "secondary-z");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.input.read(cx).value().to_string()),
+            ""
+        );
     }
 }

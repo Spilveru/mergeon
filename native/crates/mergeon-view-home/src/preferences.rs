@@ -607,6 +607,7 @@ impl Render for PreferencesPanel {
         let has_repository = model.active_repository().is_some();
         let auto_fetch_enabled = model.auto_fetch_enabled();
         let auto_fetch_interval = model.auto_fetch_interval_minutes();
+        let skip_action_dialogs = model.skip_action_dialogs();
         let desktop_notifications = model.desktop_notifications_enabled();
         let theme = if model.is_dark() { "dark" } else { "light" };
 
@@ -753,6 +754,28 @@ impl Render for PreferencesPanel {
                         )),
                 )
                 .child(self.render_editor_section(cx))
+                .child(
+                    Self::section_block("prefs-actions-section", "Git actions", cx)
+                        .child(
+                            div().flex().child(
+                                mergeon_ui::checkbox("prefs-skip-action-dialogs")
+                                    .label("Run Fetch, Pull, and Push immediately without dialogs")
+                                    .checked(skip_action_dialogs)
+                                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                        let checked = *checked;
+                                        this.model
+                                            .update(cx, |model, cx| {
+                                                model.set_skip_action_dialogs(checked, cx)
+                                            })
+                                            .detach();
+                                    })),
+                            ),
+                        )
+                        .child(Self::hint(
+                            "Uses defaults and falls back to the dialog when no safe default exists (detached HEAD, missing upstream, or no remotes). Shift+click or the Command Palette still opens options.",
+                            cx,
+                        )),
+                )
             })
             .when(section != PreferencesSection::Git, |this| {
                 this.child(

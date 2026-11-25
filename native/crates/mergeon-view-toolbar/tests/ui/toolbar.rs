@@ -720,3 +720,88 @@ async fn the_undo_buttons_are_off_during_a_sequence_operation(cx: &mut TestAppCo
         app.host.messages(NotifyType::Info)
     );
 }
+
+fn shift_click(app: &TestApp, cx: &mut TestAppContext, id: &'static str) {
+    use gpui_kit::{InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+
+    app.in_window(cx, |window, cx| {
+        let position = window.find(id).bounds().center();
+        let modifiers = Modifiers::shift();
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers,
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers,
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn direct_mode_runs_toolbar_fetch_pull_push_immediately_and_shift_click_opens_dialogs(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    repo.commit_file("direct.txt", "direct\n", "Direct push");
+    app.open(&repo, cx).await;
+
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+
+    // Normal click runs directly without opening dialogs.
+    app.click(cx, "toolbar-fetch");
+    app.wait_for(cx, "direct toolbar fetch", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("fetch"))
+    });
+    assert!(app.dialogs(cx).is_empty());
+
+    let head = repo.head();
+    app.click(cx, "toolbar-push");
+    app.wait_until(cx, "direct toolbar push", || {
+        repo.origin_ref("main").as_deref() == Some(head.as_str())
+    });
+    assert!(app.dialogs(cx).is_empty());
+
+    app.click(cx, "toolbar-pull");
+    app.wait_for(cx, "direct toolbar pull", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("pull"))
+    });
+    assert!(app.dialogs(cx).is_empty());
+
+    // Shift+click always opens the options dialog, even in direct mode.
+    for (button, cancel, title) in [
+        ("toolbar-fetch", "fetch-cancel", "Fetch"),
+        ("toolbar-pull", "pull-cancel", "Pull"),
+        ("toolbar-push", "push-cancel", "Push"),
+    ] {
+        shift_click(&app, cx, button);
+        assert_eq!(app.dialogs(cx), [title], "Shift+click on {button}");
+        app.click(cx, cancel);
+        assert!(app.dialogs(cx).is_empty());
+    }
+}

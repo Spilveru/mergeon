@@ -1264,3 +1264,70 @@ async fn the_title_bar_holds_open_the_log_and_settings(cx: &mut TestAppContext) 
             .any(|spec| spec.label == "Reload application")
     );
 }
+
+#[gpui_kit::test]
+async fn direct_mode_exposes_options_commands_and_custom_shortcuts_in_palette(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx, true);
+    let dir = repository("palette-direct-shortcuts");
+    harness.open(&dir, cx).await;
+
+    // Enable direct mode and rebind Fetch to `f5`.
+    harness
+        .model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+    harness
+        .model
+        .update(cx, |model, cx| {
+            model.set_keyboard_shortcut(ShortcutAction::Fetch, "f5", cx)
+        })
+        .await;
+    cx.run_until_parked();
+
+    harness.open_palette(cx);
+    let labels = harness.labels(cx);
+    assert!(labels.iter().any(|label| label == "Fetch"), "{labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "Fetch (options)…"),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "Pull (options)…"),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "Push (options)…"),
+        "{labels:?}"
+    );
+
+    // Selecting "Fetch (options)…" opens the Fetch dialog even in direct mode.
+    harness.set_query(cx, ">Fetch (options)");
+    assert_eq!(
+        harness.labels(cx).first().map(String::as_str),
+        Some("Fetch (options)…")
+    );
+    harness.in_window(cx, |window, cx| window.press("enter", cx));
+    wait_until(cx, "diálogo Fetch", |_| {
+        harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Fetch))
+    });
+
+    // Live rebinding via AppEvent::ShortcutsChanged: pressing `f5` now triggers Fetch!
+    harness.in_window(cx, |window, cx| {
+        mergeon_ui::dialog::close_all(window, cx);
+        window.blur(cx);
+    });
+    harness.events.borrow_mut().clear();
+    harness.in_window(cx, |window, cx| window.press("f5", cx));
+    // Repo has no remote, so direct Fetch falls back to DialogRequest::Fetch.
+    wait_until(cx, "atajo personalizado f5", |_| {
+        harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Fetch))
+    });
+}

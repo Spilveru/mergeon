@@ -61,14 +61,37 @@ pub use theme::{ActivePaletteExt, Palette, ThemePreference};
 /// los cree sin importar otra ruta: `cx.new(|cx| InputState::new(window, cx))`.
 pub use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 
-use gpui_kit::App;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::{App, Global};
+
+struct UiInitialized;
+
+impl Global for UiInitialized {}
 
 /// Inicializa gpui-kit, las fuentes, el tema y la capa de Mergeon de las
 /// ventanas (texto base, diálogos y toasts). Debe llamarse una vez, antes de
-/// abrir ventanas con `gpui_kit::open_window`.
+/// abrir ventanas con `gpui_kit::open_window`; puede volver a llamarse tras
+/// `cx.clear_key_bindings()` para re-registrar los bindings sin perder el tema
+/// activo ni recargar fuentes.
 pub fn init(cx: &mut App) {
+    let existing_dark = cx
+        .try_global::<UiInitialized>()
+        .map(|_| cx.theme().mode.is_dark());
     gpui_kit::init(cx);
-    assets::register_fonts(cx);
-    root::init(cx);
+    if existing_dark.is_none() {
+        assets::register_fonts(cx);
+        root::init(cx);
+        cx.set_global(UiInitialized);
+    }
     theme::init(cx);
+    if let Some(dark) = existing_dark {
+        theme::apply(
+            if dark {
+                ThemePreference::Dark
+            } else {
+                ThemePreference::Light
+            },
+            cx,
+        );
+    }
 }

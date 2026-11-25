@@ -2,6 +2,8 @@
 //! (`AboutDialog.vue`), el estado de las actualizaciones
 //! (`UpdateSettings.vue`) y la chuleta de atajos (`ShortcutsDialog.vue`).
 
+use std::collections::BTreeMap;
+
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -9,7 +11,9 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, relative, rems,
 };
 use mergeon_app::AppModel;
-use mergeon_app::model_types::keyboard_shortcuts::combo_label;
+use mergeon_app::model_types::keyboard_shortcuts::{
+    ShortcutAction, combo_label, effective_combo_for, is_customized,
+};
 use mergeon_ui::dialog::{AppDialog, DialogId, DialogWidth};
 use mergeon_ui::{ActivePaletteExt as _, MergeonStyled as _, Radius};
 use mergeon_updater::{ErrorPhase, UpdateStatus, UpdaterState};
@@ -293,10 +297,73 @@ pub const SHORTCUT_SECTIONS: [ShortcutSection; 5] = [
     },
 ];
 
-/// `.shortcuts`: la chuleta de atajos.
+fn cheatsheet_action(label: &str) -> Option<(ShortcutAction, bool)> {
+    use ShortcutAction as A;
+    let (action, is_secondary) = match label {
+        "Open repository" => (A::OpenRepository, false),
+        "Clone from GitHub" => (A::CloneFromGitHub, false),
+        "Clone from URL" => (A::CloneFromUrl, false),
+        "Fetch" => (A::Fetch, false),
+        "Pull" => (A::Pull, false),
+        "Push" => (A::Push, false),
+        "New branch" => (A::NewBranch, false),
+        "Reflog" => (A::ShowReflog, false),
+        "Open in editor" => (A::OpenInEditor, false),
+        "Command palette" => (A::OpenCommandPalette, false),
+        "Commits view" => (A::ShowCommitsView, false),
+        "Changes view" => (A::ShowChangesView, false),
+        "Search commits" => (A::SearchCommits, false),
+        "Search box in the toolbar" => (A::SearchCommits, true),
+        "Operation log" => (A::ShowOperationsLog, false),
+        "Next repository tab" => (A::NextRepositoryTab, false),
+        "Previous repository tab" => (A::PreviousRepositoryTab, false),
+        "Next document" => (A::NextDocumentTab, false),
+        "Previous document" => (A::PreviousDocumentTab, false),
+        "Close document" => (A::CloseTab, false),
+        "Close repository" => (A::CloseRepository, false),
+        "Reopen closed repository" => (A::ReopenClosedRepository, false),
+        "Reload application" => (A::ReloadApplication, false),
+        "Minimize window" => (A::MinimizeWindow, false),
+        "Exit Mergeon" => (A::Quit, false),
+        "Undo last Git operation" => (A::Undo, false),
+        "Redo Git operation" => (A::Redo, false),
+        "Redo Git operation (alternative)" => (A::Redo, true),
+        "Preferences" => (A::OpenPreferences, false),
+        "This cheatsheet" => (A::OpenShortcutsHelp, false),
+        _ => return None,
+    };
+    Some((action, is_secondary))
+}
+
+fn effective_cheatsheet_label(
+    label: &str,
+    default_combo: &str,
+    overrides: &BTreeMap<String, String>,
+    is_mac: bool,
+) -> Option<String> {
+    let Some((action, is_secondary)) = cheatsheet_action(label) else {
+        return Some(combo_label(default_combo, is_mac));
+    };
+    if is_secondary && is_customized(action, overrides) {
+        return None;
+    }
+    if is_secondary {
+        return Some(combo_label(default_combo, is_mac));
+    }
+    Some(
+        effective_combo_for(action, overrides)
+            .map(|combo| combo_label(&combo, is_mac))
+            .unwrap_or_else(|| "Unassigned".to_string()),
+    )
+}
+
+/// `.shortcuts`: la chuleta de atajos (sincronizada con los atajos personalizados).
 pub fn shortcuts_panel(cx: &App) -> impl IntoElement + use<> {
     let palette = *cx.palette();
     let is_mac = cfg!(target_os = "macos");
+    let overrides = AppModel::try_global(cx)
+        .map(|model| model.read(cx).keyboard_shortcuts().clone())
+        .unwrap_or_default();
 
     let sections: Vec<AnyElement> = SHORTCUT_SECTIONS
         .iter()
@@ -304,29 +371,34 @@ pub fn shortcuts_panel(cx: &App) -> impl IntoElement + use<> {
             let rows: Vec<AnyElement> = section
                 .items
                 .iter()
-                .map(|(label, combo)| {
+                .filter_map(|(label, combo)| {
+                    let displayed = effective_cheatsheet_label(label, combo, &overrides, is_mac)?;
+                    let aria = SharedString::from(format!("{label}: {displayed}"));
                     // `.shortcuts__row`
-                    div()
-                        .id(*label)
-                        .test_support()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(rems(0.75))
-                        .px(rems(0.35))
-                        .py(rems(0.25))
-                        .radius(Radius::Md, cx)
-                        .hover(|style| style.bg(palette.sidebar_row_hover))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(rems(0.8125))
-                                .line_height(relative(1.5))
-                                .text_color(palette.foreground)
-                                .child(*label),
-                        )
-                        .child(mergeon_ui::kbd(combo_label(combo, is_mac)))
-                        .into_any_element()
+                    Some(
+                        div()
+                            .id(*label)
+                            .aria_label(aria)
+                            .test_support()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(rems(0.75))
+                            .px(rems(0.35))
+                            .py(rems(0.25))
+                            .radius(Radius::Md, cx)
+                            .hover(|style| style.bg(palette.sidebar_row_hover))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(rems(0.8125))
+                                    .line_height(relative(1.5))
+                                    .text_color(palette.foreground)
+                                    .child(*label),
+                            )
+                            .child(mergeon_ui::kbd(displayed))
+                            .into_any_element(),
+                    )
                 })
                 .collect();
 

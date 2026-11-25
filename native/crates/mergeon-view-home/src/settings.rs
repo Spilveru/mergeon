@@ -16,6 +16,7 @@ use crate::github_accounts::{GitHubAccountsEvent, GitHubAccountsManager};
 use crate::help::{about_panel, shortcuts_panel, update_settings};
 use crate::parts::{lucide, plain_button};
 use crate::preferences::{PreferencesPanel, PreferencesSection};
+use crate::shortcuts::ShortcutsPanel;
 
 /// Las secciones de Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,24 +24,27 @@ pub enum SettingsSection {
     #[default]
     Appearance,
     Git,
+    Shortcuts,
     Accounts,
     Help,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 4] = [
+    pub const ALL: [SettingsSection; 5] = [
         SettingsSection::Appearance,
         SettingsSection::Git,
+        SettingsSection::Shortcuts,
         SettingsSection::Accounts,
         SettingsSection::Help,
     ];
 
     /// La clave que usa `AppModel::open_settings` (`appearance`, `git`,
-    /// `accounts`, `help`).
+    /// `shortcuts`, `accounts`, `help`).
     pub fn key(self) -> &'static str {
         match self {
             Self::Appearance => "appearance",
             Self::Git => "git",
+            Self::Shortcuts => "shortcuts",
             Self::Accounts => "accounts",
             Self::Help => "help",
         }
@@ -52,6 +56,7 @@ impl SettingsSection {
         match key {
             "appearance" => Self::Appearance,
             "git" => Self::Git,
+            "shortcuts" => Self::Shortcuts,
             "accounts" => Self::Accounts,
             _ => Self::Help,
         }
@@ -61,6 +66,7 @@ impl SettingsSection {
         match self {
             Self::Appearance => "Appearance",
             Self::Git => "Git",
+            Self::Shortcuts => "Shortcuts",
             Self::Accounts => "Accounts",
             Self::Help => "Help / About",
         }
@@ -71,7 +77,7 @@ impl SettingsSection {
         match self {
             Self::Appearance => Some(PreferencesSection::Appearance),
             Self::Git => Some(PreferencesSection::Git),
-            Self::Accounts | Self::Help => None,
+            Self::Shortcuts | Self::Accounts | Self::Help => None,
         }
     }
 
@@ -79,6 +85,7 @@ impl SettingsSection {
         match self {
             Self::Appearance => Lucide::Palette,
             Self::Git => Lucide::GitBranch,
+            Self::Shortcuts => Lucide::Keyboard,
             Self::Accounts => Lucide::Users,
             Self::Help => Lucide::CircleQuestionMark,
         }
@@ -101,6 +108,7 @@ pub struct SettingsView {
     /// El último `initialSection` visto, para reaccionar solo cuando cambia.
     initial_section: String,
     preferences: Entity<PreferencesPanel>,
+    shortcuts: Entity<ShortcutsPanel>,
     accounts: Entity<GitHubAccountsManager>,
     body_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -122,6 +130,7 @@ impl SettingsView {
                 cx,
             )
         });
+        let shortcuts = cx.new(|cx| ShortcutsPanel::new(window, cx));
         let accounts = cx.new(|cx| GitHubAccountsManager::new(true, cx));
 
         let subscriptions = vec![
@@ -148,6 +157,7 @@ impl SettingsView {
             section,
             initial_section,
             preferences,
+            shortcuts,
             accounts,
             body_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
@@ -170,6 +180,10 @@ impl SettingsView {
             return;
         }
         let was_preferences = self.section.preferences().is_some();
+        if self.section == SettingsSection::Shortcuts {
+            self.shortcuts
+                .update(cx, |shortcuts, cx| shortcuts.cancel_recording(cx));
+        }
         self.section = section;
         self.body_scroll.set_offset(point(px(0.), px(0.)));
         if let Some(preferences_section) = section.preferences() {
@@ -236,6 +250,10 @@ impl SettingsView {
             SettingsSection::Appearance | SettingsSection::Git => {
                 content.child(self.preferences.clone()).into_any_element()
             }
+            SettingsSection::Shortcuts => content
+                .w_full()
+                .child(self.shortcuts.clone())
+                .into_any_element(),
             SettingsSection::Accounts => content.child(self.accounts.clone()).into_any_element(),
             SettingsSection::Help => content
                 // `.help-content`: ocupa el ancho disponible (hasta 720 px); con

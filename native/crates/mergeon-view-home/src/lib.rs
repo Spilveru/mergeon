@@ -33,6 +33,7 @@ mod path_field;
 mod preferences;
 mod readme;
 mod settings;
+mod shortcuts;
 
 pub mod markdown;
 pub mod util;
@@ -64,6 +65,7 @@ pub use preferences::{
     PreferencesPanel, PreferencesSection, editor_options, open_preferences_dialog,
 };
 pub use settings::{SettingsEvent, SettingsSection, SettingsView};
+pub use shortcuts::{SHORTCUT_RECORDER_CONTEXT, ShortcutsPanel, combo_from_keystroke};
 
 use gpui_kit::{App, Window};
 use mergeon_app::DialogRequest;

@@ -10,17 +10,22 @@
 //! Un fallo al guardar no se queda en el log: se avisa con
 //! `reportPersistenceError`, como en el original.
 
+use std::collections::BTreeMap;
+
 use gpui_kit::{Context, Task};
 use mergeon_backend::Store;
 use mergeon_model::diff_preferences::DiffPreferences;
 use mergeon_model::file_list_width::{
     file_list_width, file_list_width_settings, saved_file_list_width,
 };
+use mergeon_model::keyboard_shortcuts::{
+    ShortcutAction, default_combo_for, normalize_overrides, normalize_shortcut_override,
+};
 use mergeon_model::resizable_width::ResizableWidth;
 use mergeon_model::sidebar_width::{saved_sidebar_width, sidebar_width, sidebar_width_settings};
 use mergeon_store::{
-    DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, EXTERNAL_EDITOR_KEY, ExternalEditorSettings, Settings,
-    SidebarSections, Theme,
+    DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, EXTERNAL_EDITOR_KEY, ExternalEditorSettings,
+    KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings, SidebarSections, Theme,
 };
 use serde_json::{Value, json};
 
@@ -45,6 +50,11 @@ pub(crate) struct SettingsState {
     pub sidebar_sections: SidebarSections,
     /// El editor externo elegido (lo que muestra Settings → Git).
     pub external_editor: ExternalEditorSettings,
+    /// Ejecutar Fetch / Pull / Push directamente sin diálogo cuando hay valores
+    /// por defecto seguros (`settings.skipActionDialogs`).
+    pub skip_action_dialogs: bool,
+    /// Atajos de teclado personalizados (`settings.keyboardShortcuts`).
+    pub keyboard_shortcuts: BTreeMap<String, String>,
     /// Preferencias de la pestaña "Local Changes".
     pub local_changes: LocalChangesPrefs,
     local_changes_loaded: bool,
@@ -96,6 +106,8 @@ impl Default for SettingsState {
             history_width: None,
             sidebar_sections: SidebarSections::default(),
             external_editor: ExternalEditorSettings::default(),
+            skip_action_dialogs: false,
+            keyboard_shortcuts: BTreeMap::new(),
             local_changes: LocalChangesPrefs::default(),
             local_changes_loaded: false,
         }
@@ -252,11 +264,18 @@ impl AppModel {
                     cx,
                 );
                 this.settings.external_editor = settings.external_editor;
+                this.settings.skip_action_dialogs = settings.skip_action_dialogs;
+                let shortcuts = normalize_overrides(&settings.keyboard_shortcuts);
+                let shortcuts_changed = shortcuts != this.settings.keyboard_shortcuts;
+                this.settings.keyboard_shortcuts = shortcuts;
                 this.settings.desktop_notifications = settings
                     .extra
                     .get(crate::desktop_notifications::DESKTOP_NOTIFICATIONS_KEY)
                     != Some(&Value::Bool(false));
                 this.settings.app_settings_loaded = true;
+                if shortcuts_changed {
+                    cx.emit(AppEvent::ShortcutsChanged);
+                }
                 cx.notify();
             });
         })
@@ -280,6 +299,104 @@ impl AppModel {
             "Failed to save auto-fetch settings",
             cx,
         )
+    }
+
+    // ------------------------------------------------------------------
+    // Ejecución directa de Fetch / Pull / Push (`settings.skipActionDialogs`)
+    // ------------------------------------------------------------------
+
+    /// Si Fetch / Pull / Push corren sin diálogo cuando hay valores seguros.
+    pub fn skip_action_dialogs(&self) -> bool {
+        self.settings.skip_action_dialogs
+    }
+
+    /// Activa o desactiva la ejecución directa sin diálogo y la guarda.
+    pub fn set_skip_action_dialogs(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<()> {
+        if self.settings.skip_action_dialogs == enabled {
+            return Task::ready(());
+        }
+        self.settings.skip_action_dialogs = enabled;
+        cx.notify();
+        self.persist_settings(
+            json!({ SKIP_ACTION_DIALOGS_KEY: enabled }),
+            "Failed to save the direct actions setting",
+            cx,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Atajos de teclado personalizados (`settings.keyboardShortcuts`)
+    // ------------------------------------------------------------------
+
+    /// Mapa `action_id -> combo` con los atajos personalizados del usuario.
+    pub fn keyboard_shortcuts(&self) -> &BTreeMap<String, String> {
+        &self.settings.keyboard_shortcuts
+    }
+
+    fn persist_keyboard_shortcuts(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        cx.emit(AppEvent::ShortcutsChanged);
+        cx.notify();
+        let shortcuts =
+            serde_json::to_value(&self.settings.keyboard_shortcuts).unwrap_or(Value::Null);
+        self.persist_settings(
+            json!({ KEYBOARD_SHORTCUTS_KEY: shortcuts }),
+            "Failed to save keyboard shortcuts",
+            cx,
+        )
+    }
+
+    /// Asigna un combo personalizado a `action` (`""` para desvincularlo).
+    /// Si coincide con el atajo por defecto, elimina el override.
+    pub fn set_keyboard_shortcut(
+        &mut self,
+        action: ShortcutAction,
+        combo: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let id = action.id();
+        if id.is_empty() {
+            return Task::ready(());
+        }
+        let Some(normalized) = normalize_shortcut_override(combo) else {
+            return Task::ready(());
+        };
+        let is_default = !normalized.is_empty() && default_combo_for(action) == Some(&normalized);
+        let changed = if is_default {
+            self.settings.keyboard_shortcuts.remove(id).is_some()
+        } else if self.settings.keyboard_shortcuts.get(id) == Some(&normalized) {
+            false
+        } else {
+            self.settings
+                .keyboard_shortcuts
+                .insert(id.to_string(), normalized);
+            true
+        };
+        if !changed {
+            return Task::ready(());
+        }
+        self.persist_keyboard_shortcuts(cx)
+    }
+
+    /// Restaura un atajo individual a su valor por defecto.
+    pub fn reset_keyboard_shortcut(
+        &mut self,
+        action: ShortcutAction,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let id = action.id();
+        if id.is_empty() || self.settings.keyboard_shortcuts.remove(id).is_none() {
+            return Task::ready(());
+        }
+        self.persist_keyboard_shortcuts(cx)
+    }
+
+    /// Restaura todos los atajos personalizados a sus valores por defecto.
+    pub fn reset_all_keyboard_shortcuts(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if self.settings.keyboard_shortcuts.is_empty() {
+            return Task::ready(());
+        }
+        self.settings.keyboard_shortcuts.clear();
+        self.persist_keyboard_shortcuts(cx)
     }
 
     // ------------------------------------------------------------------

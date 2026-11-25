@@ -7,6 +7,8 @@
 //! El nombre del repositorio ya está en su pestaña y lo que la rama lleva de
 //! ventaja o retraso, en las insignias de Pull y Push: la barra no lo repite.
 
+use std::collections::BTreeMap;
+
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,7 +19,9 @@ use gpui_kit::{
 };
 use mergeon_app::AppModel;
 use mergeon_gitcmd::{ConflictState, OperationState};
-use mergeon_model::keyboard_shortcuts::ShortcutAction;
+use mergeon_model::keyboard_shortcuts::{
+    ShortcutAction, combo_label_parts, effective_combo_for, effective_combo_label, is_customized,
+};
 use mergeon_model::repositories::{MutationQueue, RepoLifecycleState, Repository};
 use mergeon_ui::style::{control_shadow, text};
 use mergeon_ui::{ActivePaletteExt as _, IconTone, Lucide, Radius};
@@ -151,6 +155,38 @@ impl ToolbarAction {
         }
     }
 
+    fn shortcut(self) -> Option<ShortcutAction> {
+        match self {
+            Self::Fetch => Some(ShortcutAction::Fetch),
+            Self::Pull => Some(ShortcutAction::Pull),
+            Self::Push => Some(ShortcutAction::Push),
+            Self::Reflog => Some(ShortcutAction::ShowReflog),
+            Self::NewBranch => Some(ShortcutAction::NewBranch),
+            Self::OpenEditor => Some(ShortcutAction::OpenInEditor),
+            Self::Stash | Self::OpenTerminal | Self::OpenExplorer => None,
+        }
+    }
+
+    fn tooltip(
+        self,
+        shortcuts: &BTreeMap<String, String>,
+        skip_action_dialogs: bool,
+        is_mac: bool,
+    ) -> String {
+        let base = match self
+            .shortcut()
+            .and_then(|action| effective_combo_label(action, shortcuts, is_mac))
+        {
+            Some(keys) => format!("{} ({keys})", self.label()),
+            None => self.label().to_string(),
+        };
+        if skip_action_dialogs && matches!(self, Self::Fetch | Self::Pull | Self::Push) {
+            format!("{base} · Shift+click for options")
+        } else {
+            base
+        }
+    }
+
     /// La operación de `busyToolbarOperation` que marca ocupado al botón. Las
     /// acciones que tienen una son las que mutan el repositorio, y se bloquean
     /// mientras haya una operación de secuencia a medias (`isRepoBusy`).
@@ -199,6 +235,10 @@ struct ToolbarState {
     redo_label: Option<String>,
     /// Hay un deshacer o rehacer en curso.
     undo_running: bool,
+    /// Si Fetch / Pull / Push ejecutan directamente sin diálogo.
+    skip_action_dialogs: bool,
+    /// Atajos personalizados para los tooltips y el buscador.
+    keyboard_shortcuts: BTreeMap<String, String>,
 }
 
 impl ToolbarState {
@@ -221,6 +261,8 @@ impl ToolbarState {
             undo_label: model.undo_action_label(&repository.path, false),
             redo_label: model.undo_action_label(&repository.path, true),
             undo_running: model.is_undo_running(&repository.path),
+            skip_action_dialogs: model.skip_action_dialogs(),
+            keyboard_shortcuts: model.keyboard_shortcuts().clone(),
         })
     }
 }
@@ -268,8 +310,11 @@ impl ToolbarView {
         self.compact
     }
 
-    fn run(&mut self, action: ToolbarAction, cx: &mut Context<Self>) {
+    fn run(&mut self, action: ToolbarAction, shift: bool, cx: &mut Context<Self>) {
         self.model.update(cx, |model, cx| match action {
+            ToolbarAction::Fetch if shift => model.open_fetch_dialog(cx),
+            ToolbarAction::Pull if shift => model.open_pull_dialog(cx),
+            ToolbarAction::Push if shift => model.open_push_dialog(cx),
             ToolbarAction::Fetch => model.handle_fetch(cx),
             ToolbarAction::Pull => model.handle_pull(cx),
             ToolbarAction::Push => model.handle_push(cx),
@@ -299,6 +344,7 @@ impl ToolbarView {
         redo_label: Option<String>,
         blocked_reason: Option<String>,
         running: bool,
+        shortcuts: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) -> Div {
         let palette = *cx.palette();
@@ -307,11 +353,12 @@ impl ToolbarView {
         for redo in [false, true] {
             let label = if redo { &redo_label } else { &undo_label };
             let disabled = label.is_none() || blocked_reason.is_some() || running;
-            let tooltip = undo_button_tooltip(
+            let tooltip = undo_button_tooltip_with_shortcuts(
                 label.as_deref(),
                 redo,
                 blocked_reason.as_deref(),
                 running,
+                shortcuts,
                 cfg!(target_os = "macos"),
             );
             let (id, icon) = if redo {
@@ -358,6 +405,7 @@ impl ToolbarView {
         action: ToolbarAction,
         busy: bool,
         disabled: bool,
+        shortcuts: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) -> mergeon_ui::Button {
         let icon = if busy {
@@ -365,6 +413,7 @@ impl ToolbarView {
         } else {
             plain_icon(action.icon(), 16.)
         };
+        let tooltip = action.tooltip(shortcuts, false, cfg!(target_os = "macos"));
         mergeon_ui::button(action.id())
             .ghost()
             .sm()
@@ -372,34 +421,75 @@ impl ToolbarView {
             .h(px(30.))
             .px_0()
             .rounded(Radius::Md.px(cx))
-            .tooltip(action.label())
+            .tooltip(tooltip)
             .disabled(disabled)
             // `.action-btn-icon:disabled { opacity: 0.38 }`
             .when(disabled, |this| this.opacity(0.38))
             .child(icon)
-            .on_click(cx.listener(move |this, _, _, cx| this.run(action, cx)))
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                    this.run(action, event.modifiers().shift, cx)
+                }),
+            )
     }
 }
 
-/// Texto de ayuda de Deshacer / Rehacer: lo que haría y su atajo
-/// ("Undo commit 'Fix login' (Ctrl+Z)"), o que no hay nada.
+/// Texto de ayuda de Deshacer / Rehacer con los atajos por defecto.
 pub fn undo_tooltip(label: Option<&str>, redo: bool, is_mac: bool) -> String {
-    let combo = if redo { "mod+shift+z" } else { "mod+z" };
-    let keys = mergeon_model::keyboard_shortcuts::combo_label(combo, is_mac);
-    match label {
-        Some(label) => format!("{label} ({keys})"),
-        None if redo => format!("Nothing to redo ({keys})"),
-        None => format!("Nothing to undo ({keys})"),
+    undo_tooltip_with_shortcuts(label, redo, &BTreeMap::new(), is_mac)
+}
+
+/// Texto de ayuda de Deshacer / Rehacer con los atajos efectivos del usuario.
+pub fn undo_tooltip_with_shortcuts(
+    label: Option<&str>,
+    redo: bool,
+    shortcuts: &BTreeMap<String, String>,
+    is_mac: bool,
+) -> String {
+    let action = if redo {
+        ShortcutAction::Redo
+    } else {
+        ShortcutAction::Undo
+    };
+    let keys = effective_combo_label(action, shortcuts, is_mac);
+    let base = match label {
+        Some(label) => label,
+        None if redo => "Nothing to redo",
+        None => "Nothing to undo",
+    };
+    match keys {
+        Some(keys) => format!("{base} ({keys})"),
+        None => base.to_string(),
     }
 }
 
 /// Texto de ayuda real del botón ↶ / ↷: si está apagado por una operación a
 /// medias o en curso, explica por qué en lugar de prometer una acción.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn undo_button_tooltip(
     label: Option<&str>,
     redo: bool,
     blocked_reason: Option<&str>,
     running: bool,
+    is_mac: bool,
+) -> String {
+    undo_button_tooltip_with_shortcuts(
+        label,
+        redo,
+        blocked_reason,
+        running,
+        &BTreeMap::new(),
+        is_mac,
+    )
+}
+
+/// Variante de [`undo_button_tooltip`] que refleja atajos personalizados.
+pub fn undo_button_tooltip_with_shortcuts(
+    label: Option<&str>,
+    redo: bool,
+    blocked_reason: Option<&str>,
+    running: bool,
+    shortcuts: &BTreeMap<String, String>,
     is_mac: bool,
 ) -> String {
     if running {
@@ -412,7 +502,7 @@ pub fn undo_button_tooltip(
     if let Some(reason) = blocked_reason {
         return reason.to_string();
     }
-    undo_tooltip(label, redo, is_mac)
+    undo_tooltip_with_shortcuts(label, redo, shortcuts, is_mac)
 }
 
 fn undo_blocked_reason(
@@ -451,6 +541,23 @@ pub fn sync_counts_label(ahead: u32, behind: u32) -> Option<String> {
 /// Teclas del atajo del buscador tal como se pintan, una por `kbd`.
 pub fn search_shortcut_keys(is_mac: bool) -> [&'static str; 2] {
     if is_mac { ["⌘", "K"] } else { ["Ctrl", "K"] }
+}
+
+/// Teclas efectivas del buscador de commits (si el usuario lo personalizó,
+/// muestra su combo; si lo desvinculó, devuelve vacío).
+pub fn effective_search_shortcut_keys(
+    shortcuts: &BTreeMap<String, String>,
+    is_mac: bool,
+) -> Vec<String> {
+    if !is_customized(ShortcutAction::SearchCommits, shortcuts) {
+        return search_shortcut_keys(is_mac)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
+    effective_combo_for(ShortcutAction::SearchCommits, shortcuts)
+        .map(|combo| combo_label_parts(&combo, is_mac))
+        .unwrap_or_default()
 }
 
 /// Texto del buscador de la barra.
@@ -529,6 +636,7 @@ impl ToolbarView {
         disabled: bool,
         badge: Option<AnyElement>,
         edges: (bool, bool),
+        tooltip: String,
         cx: &mut Context<Self>,
     ) -> mergeon_ui::Button {
         let inner_radius = (Radius::Md.px(cx) - px(1.)).max(px(0.));
@@ -544,12 +652,17 @@ impl ToolbarView {
             .when(first, |this| this.rounded_l(inner_radius))
             .when(last, |this| this.rounded_r(inner_radius))
             .shadow(Vec::new())
+            .tooltip(tooltip)
             .disabled(disabled)
             .loading(busy)
             .when(!busy, |this| this.child(button_icon(action.icon(), cx)))
             .child(div().child(action.label()))
             .children(badge)
-            .on_click(cx.listener(move |this, _, _, cx| this.run(action, cx)))
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                    this.run(action, event.modifiers().shift, cx)
+                }),
+            )
     }
 
     /// Abre la búsqueda de commits de la app (la del panel lateral), como
@@ -564,8 +677,14 @@ impl ToolbarView {
     /// búsqueda de commits que ya existe (la lupa del panel lateral). Con
     /// `grow` se lleva el ancho que sobre (fila de abajo en la barra de dos
     /// filas).
-    fn search_field(&self, grow: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn search_field(
+        &self,
+        grow: bool,
+        shortcuts: &BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let palette = *cx.palette();
+        let keys = effective_search_shortcut_keys(shortcuts, cfg!(target_os = "macos"));
         div()
             .id("toolbar-search")
             .test_support()
@@ -597,13 +716,15 @@ impl ToolbarView {
                     .truncate()
                     .child(SEARCH_PLACEHOLDER),
             )
-            .child(
-                div().flex().flex_shrink_0().gap(px(2.)).children(
-                    search_shortcut_keys(cfg!(target_os = "macos"))
-                        .into_iter()
-                        .map(mergeon_ui::kbd),
-                ),
-            )
+            .when(!keys.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .gap(px(2.))
+                        .children(keys.into_iter().map(mergeon_ui::kbd)),
+                )
+            })
             .when(grow, |this| this.flex_1())
             .on_click(cx.listener(|this, _, _, cx| this.open_search(cx)))
             .into_any_element()
@@ -629,6 +750,8 @@ impl Render for ToolbarView {
             undo_label,
             redo_label,
             undo_running,
+            skip_action_dialogs,
+            keyboard_shortcuts,
         }) = state
         else {
             return div().into_any_element();
@@ -665,22 +788,34 @@ impl Render for ToolbarView {
                 sync_group = sync_group.child(segment_divider(palette.border_hair));
             }
             let busy = busy_operation == action.operation();
+            let tooltip = action.tooltip(
+                &keyboard_shortcuts,
+                skip_action_dialogs,
+                cfg!(target_os = "macos"),
+            );
             sync_group = sync_group.child(Self::segment_button(
                 action,
                 busy,
                 repo_busy || busy,
                 badge,
                 (index == 0, index == last_sync),
+                tooltip,
                 cx,
             ));
         }
         let stash_busy = busy_operation == ToolbarAction::Stash.operation();
+        let stash_tooltip = ToolbarAction::Stash.tooltip(
+            &keyboard_shortcuts,
+            skip_action_dialogs,
+            cfg!(target_os = "macos"),
+        );
         let stash_group = segmented_group(cx).child(Self::segment_button(
             ToolbarAction::Stash,
             stash_busy,
             repo_busy || stash_busy,
             None,
             (true, true),
+            stash_tooltip,
             cx,
         ));
 
@@ -698,6 +833,7 @@ impl Render for ToolbarView {
                 redo_label,
                 undo_blocked,
                 undo_running,
+                &keyboard_shortcuts,
                 cx,
             ))
             .child(sync_group)
@@ -777,7 +913,7 @@ impl Render for ToolbarView {
             )
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::OpenBranchPicker)));
 
-        let search = self.search_field(compact, cx);
+        let search = self.search_field(compact, &keyboard_shortcuts, cx);
 
         let right = div()
             .flex()
@@ -787,7 +923,13 @@ impl Render for ToolbarView {
             .children(ICON_ACTIONS.into_iter().map(|action| {
                 let mutates = action.operation().is_some();
                 let busy = mutates && busy_operation == action.operation();
-                Self::icon_button(action, busy, busy || (mutates && repo_busy), cx)
+                Self::icon_button(
+                    action,
+                    busy,
+                    busy || (mutates && repo_busy),
+                    &keyboard_shortcuts,
+                    cx,
+                )
             }));
 
         div()

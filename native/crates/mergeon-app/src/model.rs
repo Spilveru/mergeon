@@ -73,6 +73,9 @@ pub enum AppEvent {
     ShowDialog(DialogRequest),
     /// El tema cambió (`applyTheme`): la cáscara lo aplica a la ventana.
     ThemeChanged { dark: bool },
+    /// Cambiaron los atajos de teclado personalizados: la cáscara vuelve a
+    /// registrar los bindings globales de GPUI en vivo.
+    ShortcutsChanged,
     /// Algo que solo puede hacer la ventana.
     Window(WindowRequest),
 }

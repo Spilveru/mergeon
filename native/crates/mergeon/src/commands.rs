@@ -12,12 +12,12 @@
 //! mientras hay una operación de secuencia a medias (como la barra). En la
 //! paleta se ven atenuados y al final.
 
+use std::collections::BTreeMap;
+
 use gpui_kit::{App, Entity};
 use mergeon_app::{AppModel, PullRequestsAvailability};
 use mergeon_model::command_palette::PaletteScope;
-use mergeon_model::keyboard_shortcuts::{
-    APP_SHORTCUTS, ShortcutAction, WORKSPACE_SHORTCUTS, combo_label, is_mac_platform,
-};
+use mergeon_model::keyboard_shortcuts::{ShortcutAction, effective_combo_label, is_mac_platform};
 use mergeon_model::repositories::RepoLifecycleState;
 use mergeon_ui::Lucide;
 
@@ -26,6 +26,12 @@ use mergeon_ui::Lucide;
 pub enum Command {
     /// Lo mismo que su atajo.
     Shortcut(ShortcutAction),
+    /// Abre siempre el diálogo de opciones de Fetch (útil con ejecución directa activa).
+    FetchDialog,
+    /// Abre siempre el diálogo de opciones de Pull.
+    PullDialog,
+    /// Abre siempre el diálogo de opciones de Push.
+    PushDialog,
     /// "Stash" de la barra.
     Stash,
     /// "Open Terminal" de la barra.
@@ -178,6 +184,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         Lucide::ArrowDownToLine,
         ShortcutAction::Fetch,
     ),
+    spec(
+        "fetch-options",
+        "Fetch (options)…",
+        REPOSITORY,
+        Lucide::ArrowDownToLine,
+        Command::FetchDialog,
+    ),
     shortcut(
         "pull",
         "Pull…",
@@ -185,12 +198,26 @@ pub const COMMANDS: &[CommandSpec] = &[
         Lucide::Download,
         ShortcutAction::Pull,
     ),
+    spec(
+        "pull-options",
+        "Pull (options)…",
+        REPOSITORY,
+        Lucide::Download,
+        Command::PullDialog,
+    ),
     shortcut(
         "push",
         "Push…",
         REPOSITORY,
         Lucide::Upload,
         ShortcutAction::Push,
+    ),
+    spec(
+        "push-options",
+        "Push (options)…",
+        REPOSITORY,
+        Lucide::Upload,
+        Command::PushDialog,
     ),
     spec(
         "stash",
@@ -505,6 +532,9 @@ impl CommandSpec {
         let mutates = || context.has_repository && context.repository_idle;
         match self.command {
             Command::Shortcut(A::Fetch | A::Pull | A::Push | A::NewBranch)
+            | Command::FetchDialog
+            | Command::PullDialog
+            | Command::PushDialog
             | Command::Stash
             | Command::Sidebar(SidebarTask::CleanupMergedBranches | SidebarTask::NewWorktree) => {
                 mutates()
@@ -543,16 +573,41 @@ impl CommandSpec {
         }
     }
 
-    /// El atajo tal como se pinta (`Ctrl+Shift+F`, `⌘⇧F`).
-    pub fn shortcut_label(&self) -> Option<String> {
+    /// Etiqueta visible en la paleta según si la ejecución directa está activa.
+    pub fn display_label(&self, skip_action_dialogs: bool) -> &'static str {
+        if skip_action_dialogs {
+            match self.command {
+                Command::Shortcut(ShortcutAction::Fetch) => return "Fetch",
+                Command::Shortcut(ShortcutAction::Pull) => return "Pull",
+                Command::Shortcut(ShortcutAction::Push) => return "Push",
+                _ => {}
+            }
+        }
+        self.label
+    }
+
+    /// Si el comando debe aparecer en la paleta en el modo actual.
+    pub fn visible(&self, skip_action_dialogs: bool) -> bool {
+        skip_action_dialogs
+            || !matches!(
+                self.command,
+                Command::FetchDialog | Command::PullDialog | Command::PushDialog
+            )
+    }
+
+    /// El atajo efectivo tal como se pinta (`Ctrl+Shift+F`, `⌘⇧F`), teniendo en
+    /// cuenta los atajos personalizados del usuario.
+    pub fn shortcut_label_with(&self, overrides: &BTreeMap<String, String>) -> Option<String> {
         let Command::Shortcut(action) = self.command else {
             return None;
         };
-        APP_SHORTCUTS
-            .iter()
-            .chain(WORKSPACE_SHORTCUTS)
-            .find(|binding| binding.action == action)
-            .map(|binding| combo_label(binding.combo, is_mac_platform()))
+        effective_combo_label(action, overrides, is_mac_platform())
+    }
+
+    /// El atajo por defecto tal como se pinta (`Ctrl+Shift+F`, `⌘⇧F`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn shortcut_label(&self) -> Option<String> {
+        self.shortcut_label_with(&BTreeMap::new())
     }
 }
 
@@ -562,6 +617,9 @@ impl CommandSpec {
 pub fn run(command: Command, model: &Entity<AppModel>, cx: &mut App) {
     model.update(cx, |model, cx| match command {
         Command::Shortcut(action) => model.handle_shortcut(action, cx),
+        Command::FetchDialog => model.open_fetch_dialog(cx),
+        Command::PullDialog => model.open_pull_dialog(cx),
+        Command::PushDialog => model.open_push_dialog(cx),
         Command::Stash => model.handle_stash(cx).detach(),
         Command::StashSelected => {
             let paths = model
@@ -596,6 +654,7 @@ pub fn run(command: Command, model: &Entity<AppModel>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mergeon_model::keyboard_shortcuts::{APP_SHORTCUTS, WORKSPACE_SHORTCUTS, combo_label};
     use std::collections::HashSet;
 
     #[test]

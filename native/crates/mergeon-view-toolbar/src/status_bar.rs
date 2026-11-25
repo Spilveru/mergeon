@@ -274,9 +274,15 @@ impl StatusBarView {
 }
 
 impl StatusBarView {
-    /// Clic en "fetched N min ago": otro Fetch.
-    fn fetch(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |model, cx| model.handle_fetch(cx));
+    /// Clic en "fetched N min ago": otro Fetch (Shift+clic abre el diálogo).
+    fn fetch(&mut self, shift: bool, cx: &mut Context<Self>) {
+        self.model.update(cx, |model, cx| {
+            if shift {
+                model.open_fetch_dialog(cx);
+            } else {
+                model.handle_fetch(cx);
+            }
+        });
     }
 }
 
@@ -355,7 +361,9 @@ impl Render for StatusBarView {
                                 .tone(IconTone::Current),
                         )
                         .child(fetched)
-                        .on_click(cx.listener(|this, _, _, cx| this.fetch(cx))),
+                        .on_click(cx.listener(|this, event: &gpui_kit::ClickEvent, _, cx| {
+                            this.fetch(event.modifiers().shift, cx)
+                        })),
                 )
             })
             .child(self.pull_request.clone())

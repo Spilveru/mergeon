@@ -42,8 +42,9 @@ pub use schema::{
 };
 pub use settings::{
     CommitViewSettings, CommitViewUpdate, DEFAULT_AUTO_FETCH_INTERVAL_MINUTES,
-    DEFAULT_MAX_RECENT_REPOS, DiffViewMode, EXTERNAL_EDITOR_KEY, ExternalEditorSettings, Settings,
-    SettingsUpdate, SidebarSections, SidebarSectionsUpdate, Theme,
+    DEFAULT_MAX_RECENT_REPOS, DiffViewMode, EXTERNAL_EDITOR_KEY, ExternalEditorSettings,
+    KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings, SettingsUpdate, SidebarSections,
+    SidebarSectionsUpdate, Theme,
 };
 pub use store::{ElectronImport, LoadReport, LoadStatus, Store, StoreOptions};
 pub use types::{GitHubAccount, GitHubInstallation, RecentRepository, WorkspaceSession};

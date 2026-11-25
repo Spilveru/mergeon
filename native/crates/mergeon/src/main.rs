@@ -40,6 +40,23 @@ fn is_packaged() -> bool {
 /// (`Input`: Ctrl+Z / Ctrl+Y) y las vistas (`DiffViewer`: Ctrl+F).
 pub(crate) fn init_bindings(cx: &mut gpui_kit::App) {
     shortcuts::init(cx);
+    bind_ui_and_view_keys(cx);
+}
+
+/// Vuelve a registrar los atajos en caliente tras un cambio del usuario,
+/// manteniendo exactamente la misma precedencia (`shortcuts` antes que
+/// `mergeon_ui` y las vistas para que `Input`, `DiffViewer` y `CommitPanel`
+/// sigan ganando en sus contextos).
+pub(crate) fn rebind_shortcuts(
+    overrides: &std::collections::BTreeMap<String, String>,
+    cx: &mut gpui_kit::App,
+) {
+    cx.clear_key_bindings();
+    shortcuts::bind_keys(cx, overrides);
+    bind_ui_and_view_keys(cx);
+}
+
+fn bind_ui_and_view_keys(cx: &mut gpui_kit::App) {
     mergeon_ui::init(cx);
     mergeon_view_diff::init(cx);
     mergeon_view_toolbar::init(cx);

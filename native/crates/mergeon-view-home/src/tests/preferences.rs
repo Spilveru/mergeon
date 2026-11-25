@@ -438,3 +438,32 @@ async fn choosing_a_custom_command_focuses_the_command_field(cx: &mut TestAppCon
     });
     assert!(focused, "the Command field should have the focus");
 }
+
+#[gpui_kit::test]
+async fn skip_action_dialogs_setting_is_toggled_and_persisted_in_git_preferences(
+    cx: &mut TestAppContext,
+) {
+    let (app, _workspace, _repository, _panel) = preferences(cx);
+    assert!(app.exists(cx, "prefs-actions-section"));
+    assert!(app.exists(cx, "prefs-skip-action-dialogs"));
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+
+    app.click(cx, "prefs-skip-action-dialogs");
+
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+    assert!(app.backend.storage().get_settings().skip_action_dialogs);
+
+    app.click(cx, "prefs-skip-action-dialogs");
+
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+    assert!(!app.backend.storage().get_settings().skip_action_dialogs);
+}

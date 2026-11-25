@@ -635,7 +635,7 @@ impl AppModel {
             ShortcutAction::ShowReflog => cx.emit(AppEvent::ShowDialog(DialogRequest::Reflog)),
             ShortcutAction::OpenInEditor => self.open_active_in_editor(cx).detach(),
             ShortcutAction::OpenPreferences => self.open_settings("appearance", cx),
-            ShortcutAction::OpenShortcutsHelp => self.open_settings("help", cx),
+            ShortcutAction::OpenShortcutsHelp => self.open_settings("shortcuts", cx),
             ShortcutAction::CloseTab => self.close_current_tab(cx),
             ShortcutAction::CloseRepository => self.close_active_repository(cx),
             ShortcutAction::ReopenClosedRepository => {
@@ -1647,25 +1647,141 @@ impl AppModel {
     // Fetch / pull / push
     // ------------------------------------------------------------------
 
-    /// `handleFetch`: abre el diálogo de fetch.
-    pub fn handle_fetch(&mut self, cx: &mut Context<Self>) {
+    /// Abre siempre el diálogo de fetch (p. ej. Shift+clic o Command Palette).
+    pub fn open_fetch_dialog(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_some() {
             cx.emit(AppEvent::ShowDialog(DialogRequest::Fetch));
         }
     }
 
-    /// `handlePull`: abre el diálogo de pull.
-    pub fn handle_pull(&mut self, cx: &mut Context<Self>) {
+    /// Abre siempre el diálogo de pull (p. ej. Shift+clic o Command Palette).
+    pub fn open_pull_dialog(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_some() {
             cx.emit(AppEvent::ShowDialog(DialogRequest::Pull));
         }
     }
 
-    /// `handlePush`: abre el diálogo de push.
-    pub fn handle_push(&mut self, cx: &mut Context<Self>) {
+    /// Abre siempre el diálogo de push (p. ej. Shift+clic o Command Palette).
+    pub fn open_push_dialog(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_some() {
             cx.emit(AppEvent::ShowDialog(DialogRequest::Push));
         }
+    }
+
+    /// Petición segura para ejecutar Fetch directamente (`all_remotes: true`
+    /// siempre que el repositorio activo tenga al menos un remoto).
+    pub(crate) fn direct_fetch_request(&self) -> Option<FetchRequest> {
+        self.active_repository()?;
+        if self.repositories.active_repository_remotes().is_empty() {
+            return None;
+        }
+        Some(FetchRequest {
+            remote: self.default_remote_name(),
+            all_remotes: true,
+        })
+    }
+
+    /// Petición segura para ejecutar Pull directamente: rama local (no HEAD
+    /// desanclado), remoto por defecto válido y rama remota destino (upstream
+    /// configurado o rama homónima en ese remoto).
+    pub(crate) fn direct_pull_request(&self) -> Option<PullRequest> {
+        self.active_repository()?;
+        let current = self.active_repo_current_branch();
+        if current.is_empty() || current == "HEAD" {
+            return None;
+        }
+        let remote = self.default_remote_name();
+        let remote_entry = self
+            .repositories
+            .active_repository_remotes()
+            .iter()
+            .find(|entry| entry.name == remote)?;
+        let upstream_branch = self
+            .active_branch_entry()
+            .and_then(|entry| entry.upstream.as_deref())
+            .and_then(|upstream| upstream.split_once('/'))
+            .filter(|(up_remote, up_branch)| *up_remote == remote && !up_branch.is_empty())
+            .map(|(_, up_branch)| up_branch.to_string());
+        let branch = upstream_branch.or_else(|| {
+            remote_entry
+                .branches
+                .iter()
+                .find(|branch| branch.as_str() == current)
+                .cloned()
+        })?;
+        Some(PullRequest {
+            remote,
+            branch: Some(branch),
+            rebase: false,
+            autostash: false,
+        })
+    }
+
+    /// Petición segura para ejecutar Push directamente: rama local (no HEAD
+    /// desanclado) con upstream configurado. Nunca hace force push ni sube tags.
+    pub(crate) fn direct_push_request(&self) -> Option<PushRequest> {
+        self.active_repository()?;
+        let branch = self.active_repo_current_branch();
+        if branch.is_empty() || branch == "HEAD" {
+            return None;
+        }
+        let upstream = self
+            .active_branch_entry()
+            .filter(|entry| !entry.is_remote)
+            .and_then(|entry| entry.upstream.as_deref())
+            .filter(|upstream| !upstream.is_empty())?
+            .to_string();
+        Some(PushRequest {
+            branch: branch.to_string(),
+            destination: upstream,
+            push_tags: false,
+            force: false,
+        })
+    }
+
+    /// `handleFetch`: ejecuta fetch directamente si `skip_action_dialogs` está
+    /// activo y existe al menos un remoto; si no, abre el diálogo de fetch.
+    pub fn handle_fetch(&mut self, cx: &mut Context<Self>) {
+        if self.active_repository().is_none() {
+            return;
+        }
+        if self.settings.skip_action_dialogs
+            && let Some(request) = self.direct_fetch_request()
+        {
+            self.run_fetch(request, false, cx).detach();
+            return;
+        }
+        self.open_fetch_dialog(cx);
+    }
+
+    /// `handlePull`: ejecuta pull directamente si `skip_action_dialogs` está
+    /// activo y hay un destino seguro; si no, abre el diálogo de pull.
+    pub fn handle_pull(&mut self, cx: &mut Context<Self>) {
+        if self.active_repository().is_none() {
+            return;
+        }
+        if self.settings.skip_action_dialogs
+            && let Some(request) = self.direct_pull_request()
+        {
+            self.handle_pull_submit(request, cx).detach();
+            return;
+        }
+        self.open_pull_dialog(cx);
+    }
+
+    /// `handlePush`: ejecuta push directamente si `skip_action_dialogs` está
+    /// activo y la rama actual tiene upstream; si no, abre el diálogo de push.
+    pub fn handle_push(&mut self, cx: &mut Context<Self>) {
+        if self.active_repository().is_none() {
+            return;
+        }
+        if self.settings.skip_action_dialogs
+            && let Some(request) = self.direct_push_request()
+        {
+            self.handle_push_submit(request, cx).detach();
+            return;
+        }
+        self.open_push_dialog(cx);
     }
 
     /// `promptForOriginRemote`: pide la URL del remoto y lo añade como
