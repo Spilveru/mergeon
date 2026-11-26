@@ -113,6 +113,10 @@ pub struct ShortcutsPanel {
     recording: Option<ShortcutAction>,
     recording_error: Option<SharedString>,
     recorder_focus: FocusHandle,
+    /// Interceptor activo únicamente mientras se está grabando un atajo, para
+    /// capturar también combinaciones que ya están enlazadas en el keymap
+    /// global (p. ej. al reasignar o provocar un conflicto).
+    recording_interceptor: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -129,12 +133,12 @@ impl ShortcutsPanel {
         let recorder_focus = cx.focus_handle();
         let subscriptions = vec![
             cx.observe(&model, |_, _, cx| cx.notify()),
+            cx.on_blur(&recorder_focus, window, |this, _, cx| {
+                this.cancel_recording(cx);
+            }),
             cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    if this.recording.is_some() {
-                        this.recording = None;
-                        this.recording_error = None;
-                    }
+                    this.cancel_recording(cx);
                     cx.notify();
                 }
             }),
@@ -145,6 +149,7 @@ impl ShortcutsPanel {
             recording: None,
             recording_error: None,
             recorder_focus,
+            recording_interceptor: None,
             _subscriptions: subscriptions,
         }
     }
@@ -162,62 +167,70 @@ impl ShortcutsPanel {
         cx: &mut Context<Self>,
     ) {
         if self.recording == Some(action) {
-            self.recording = None;
-            self.recording_error = None;
+            self.stop_recording();
             cx.notify();
             return;
         }
         self.recording = Some(action);
         self.recording_error = None;
+        let weak = cx.weak_entity();
+        self.recording_interceptor = Some(cx.intercept_keystrokes(move |event, _, cx| {
+            let handled = weak
+                .update(cx, |this, cx| this.record_keystroke(&event.keystroke, cx))
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        }));
         window.focus(&self.recorder_focus, cx);
         cx.notify();
     }
 
+    fn stop_recording(&mut self) {
+        self.recording = None;
+        self.recording_error = None;
+        self.recording_interceptor = None;
+    }
+
     /// Cancela la grabación en curso.
     pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
-        if self.recording.take().is_some() || self.recording_error.take().is_some() {
+        if self.recording.is_some()
+            || self.recording_error.is_some()
+            || self.recording_interceptor.is_some()
+        {
+            self.stop_recording();
             cx.notify();
         }
     }
 
-    fn handle_record_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
         let Some(action) = self.recording else {
-            return;
+            return false;
         };
-        let key = event.keystroke.key.trim().to_ascii_lowercase();
-        let no_modifiers = !event.keystroke.modifiers.modified();
-
-        cx.stop_propagation();
+        let key = keystroke.key.trim().to_ascii_lowercase();
+        let no_modifiers = !keystroke.modifiers.modified();
 
         if is_modifier_only_key(&key) {
-            return;
+            return true;
         }
         if key == "escape" && no_modifiers {
-            self.recording = None;
-            self.recording_error = None;
+            self.stop_recording();
             cx.notify();
-            return;
+            return true;
         }
         if matches!(key.as_str(), "backspace" | "delete") && no_modifiers {
-            self.recording = None;
-            self.recording_error = None;
+            self.stop_recording();
             self.model
                 .update(cx, |model, cx| model.set_keyboard_shortcut(action, "", cx))
                 .detach();
             cx.notify();
-            return;
+            return true;
         }
 
         let is_mac = is_mac_platform();
-        match combo_from_keystroke(&event.keystroke, is_mac) {
+        match combo_from_keystroke(keystroke, is_mac) {
             Some(combo) => {
-                self.recording = None;
-                self.recording_error = None;
+                self.stop_recording();
                 self.model
                     .update(cx, |model, cx| {
                         model.set_keyboard_shortcut(action, &combo, cx)
@@ -239,6 +252,18 @@ impl ShortcutsPanel {
                 );
                 cx.notify();
             }
+        }
+        true
+    }
+
+    fn handle_record_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.record_keystroke(&event.keystroke, cx) {
+            cx.stop_propagation();
         }
     }
 
@@ -468,7 +493,9 @@ impl Render for ShortcutsPanel {
             .id("shortcuts-panel")
             .test_support()
             .track_focus(&self.recorder_focus)
-            .key_context(SHORTCUT_RECORDER_CONTEXT)
+            .when(self.recording.is_some(), |el| {
+                el.key_context(SHORTCUT_RECORDER_CONTEXT)
+            })
             .capture_key_down(cx.listener(Self::handle_record_key_down))
             .flex()
             .flex_col()

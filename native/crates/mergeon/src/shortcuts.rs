@@ -606,4 +606,55 @@ mod tests {
             ""
         );
     }
+
+    #[gpui_kit::test]
+    async fn shortcut_recorder_captures_already_bound_global_keys_and_releases_after(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, WindowOptions};
+        use mergeon_view_home::ShortcutsPanel;
+
+        cx.executor().allow_parking();
+        let (backend, events) = mergeon_app::testing::TestBackend::new().build();
+        let model = cx.update(|cx| {
+            crate::init_bindings(cx);
+            AppModel::init(backend, events, cx)
+        });
+        model.update(cx, |model, cx| model.open_settings("shortcuts", cx));
+        let (window, panel) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| ShortcutsPanel::new(window, cx))
+            })
+            .expect("ventana de prueba")
+        });
+
+        // Start recording Fetch and press `secondary-shift-u` (already globally bound to Push).
+        cx.update_window(window, |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.toggle_recording(ShortcutAction::Fetch, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.recording()),
+            Some(ShortcutAction::Fetch)
+        );
+
+        cx.simulate_keystrokes(window, "secondary-shift-u");
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |panel, _| panel.recording()), None);
+        assert_eq!(
+            model.read_with(cx, |model, _| {
+                model.keyboard_shortcuts().get("fetch").cloned()
+            }),
+            Some("mod+shift+u".to_string())
+        );
+
+        // Immediately after recording finishes, global shortcuts like `secondary-w` work again.
+        assert!(model.read_with(cx, |model, _| model.show_preferences()));
+        cx.simulate_keystrokes(window, "secondary-w");
+        cx.run_until_parked();
+        assert!(!model.read_with(cx, |model, _| model.show_preferences()));
+    }
 }
