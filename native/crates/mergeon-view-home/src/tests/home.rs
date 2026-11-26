@@ -1,6 +1,6 @@
 //! `Dashboard.test.js` y lo que el inicio hace además.
 
-use gpui_kit::TestAppContext;
+use gpui_kit::{AppContext as _, TestAppContext};
 use mergeon_app::model_types::notify::NotifyType;
 use mergeon_app::testing::{FakeGitHubTransport, TestBackend};
 use serde_json::json;
@@ -589,5 +589,84 @@ async fn home_shows_workspaces_progressively_and_allows_creating_and_switching(
             model.active_repository().map(|repo| repo.path.as_str()),
             Some(open.as_str())
         );
+    });
+}
+
+#[gpui_kit::test]
+async fn home_repository_context_menu_assigns_and_toggles_multiple_workspaces(
+    cx: &mut TestAppContext,
+) {
+    let (app, _workspace, open, recent, _home) = dashboard(cx);
+
+    // Sin workspaces: el menú ofrece crear uno con ese repositorio y activarlo lo crea.
+    let items_before = cx.update(|cx| crate::home::home_repository_menu(&app.model, &recent, cx));
+    let create_entry = items_before
+        .iter()
+        .find(|item| item.text().as_ref() == "New workspace with this repository…")
+        .expect("create workspace item");
+    app.host.answer_prompt("Work");
+    assert!(
+        cx.update_window(app.window, |_, window, cx| create_entry
+            .activate(window, cx))
+            .unwrap()
+    );
+    app.wait_for(cx, "workspace Work created from home repo menu", |cx| {
+        app.model.read_with(cx, |model, _| {
+            model
+                .workspaces()
+                .iter()
+                .any(|ws| ws.name == "Work" && model.is_repository_in_workspace(&recent, &ws.id))
+        })
+    });
+
+    // Con un segundo workspace: el menú expone el submenú "Workspaces" y permite asignar varios.
+    let (work_id, personal_id) = app.model.update(cx, |model, cx| {
+        let work_id = model.workspaces()[0].id.clone();
+        let personal = model
+            .create_workspace("Personal", Vec::new(), cx)
+            .expect("personal");
+        (work_id, personal.id)
+    });
+    app.settle(cx);
+
+    let items_with_ws = cx.update(|cx| crate::home::home_repository_menu(&app.model, &open, cx));
+    assert!(
+        items_with_ws
+            .iter()
+            .any(|item| item.text().as_ref() == "Open repository")
+    );
+    assert!(
+        items_with_ws
+            .iter()
+            .any(|item| item.text().as_ref() == "Workspaces")
+    );
+
+    // Asignar `open` tanto a Work como a Personal activando los ítems del submenú.
+    let sub_items =
+        cx.update(|cx| crate::home::home_repository_workspace_items(&app.model, &open, cx));
+    assert_eq!(sub_items[0].text().as_ref(), "Work");
+    assert_eq!(sub_items[1].text().as_ref(), "Personal");
+    cx.update_window(app.window, |_, window, cx| {
+        assert!(sub_items[0].activate(window, cx));
+        assert!(sub_items[1].activate(window, cx));
+    })
+    .unwrap();
+    app.settle(cx);
+    app.model.read_with(cx, |model, _| {
+        assert!(model.is_repository_in_workspace(&open, &work_id));
+        assert!(model.is_repository_in_workspace(&open, &personal_id));
+    });
+
+    // Volver a activar Work lo desmarca sin quitarlo de Personal.
+    let sub_items_after =
+        cx.update(|cx| crate::home::home_repository_workspace_items(&app.model, &open, cx));
+    cx.update_window(app.window, |_, window, cx| {
+        assert!(sub_items_after[0].activate(window, cx));
+    })
+    .unwrap();
+    app.settle(cx);
+    app.model.read_with(cx, |model, _| {
+        assert!(!model.is_repository_in_workspace(&open, &work_id));
+        assert!(model.is_repository_in_workspace(&open, &personal_id));
     });
 }

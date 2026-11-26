@@ -32,6 +32,103 @@ use crate::util::{
     parent_folder_name,
 };
 
+/// Elementos del submenú "Workspaces" de una fila de repositorio en el inicio.
+pub(crate) fn home_repository_workspace_items(
+    model: &Entity<AppModel>,
+    repo_path: &str,
+    cx: &App,
+) -> Vec<MenuItem> {
+    let workspaces: Vec<(String, String, bool)> = {
+        let read = model.read(cx);
+        read.workspaces()
+            .iter()
+            .map(|workspace| {
+                (
+                    workspace.id.clone(),
+                    workspace.name.clone(),
+                    read.is_repository_in_workspace(repo_path, &workspace.id),
+                )
+            })
+            .collect()
+    };
+
+    let mut sub_items: Vec<MenuItem> = workspaces
+        .into_iter()
+        .map(|(ws_id, ws_name, is_member)| {
+            let model = model.clone();
+            let path = repo_path.to_string();
+            MenuItem::new(ws_name)
+                .checked(is_member)
+                .on_click(move |_, cx| {
+                    model.update(cx, |model, cx| {
+                        if is_member {
+                            model.remove_repository_from_workspace(&path, &ws_id, cx);
+                        } else {
+                            model.add_repository_to_workspace(&path, &ws_id, cx);
+                        }
+                    });
+                })
+        })
+        .collect();
+    if !sub_items.is_empty() {
+        sub_items.push(MenuItem::separator());
+    }
+    let new_model = model.clone();
+    let new_path = repo_path.to_string();
+    sub_items.push(
+        MenuItem::new("New workspace with this repository…")
+            .icon(Lucide::Plus)
+            .on_click(move |_, cx| {
+                new_model.update(cx, |model, cx| {
+                    model
+                        .prompt_create_workspace(vec![new_path.clone()], cx)
+                        .detach();
+                });
+            }),
+    );
+    sub_items
+}
+
+/// Menú contextual de una fila de repositorio en el inicio: abrirlo y
+/// asignarlo (o quitarlo) de uno o varios workspaces.
+pub(crate) fn home_repository_menu(
+    model: &Entity<AppModel>,
+    repo_path: &str,
+    cx: &App,
+) -> Vec<MenuItem> {
+    let open_item = {
+        let model = model.clone();
+        let path = repo_path.to_string();
+        MenuItem::new("Open repository")
+            .icon(Lucide::FolderOpen)
+            .on_click(move |_, cx| {
+                model.update(cx, |model, cx| {
+                    model.handle_open_repository(&path, cx).detach();
+                });
+            })
+    };
+
+    let has_workspaces = !model.read(cx).workspaces().is_empty();
+    let workspace_entry = if !has_workspaces {
+        let model = model.clone();
+        let path = repo_path.to_string();
+        MenuItem::new("New workspace with this repository…")
+            .icon(Lucide::Folders)
+            .on_click(move |_, cx| {
+                model.update(cx, |model, cx| {
+                    model
+                        .prompt_create_workspace(vec![path.clone()], cx)
+                        .detach();
+                });
+            })
+    } else {
+        let sub_items = home_repository_workspace_items(model, repo_path, cx);
+        MenuItem::submenu("Workspaces", sub_items).icon(Lucide::Folders)
+    };
+
+    vec![open_item, MenuItem::separator(), workspace_entry]
+}
+
 /// Un repositorio de la lista del inicio: abierto o reciente.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryEntry {
@@ -917,10 +1014,12 @@ impl HomeView {
         open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BaseButton {
+    ) -> impl IntoElement + use<> {
         let palette = *cx.palette();
         let selected = self.selected_repo_path.as_deref() == Some(repo.path.as_str());
         let path = repo.path.clone();
+        let menu_model = self.model.clone();
+        let menu_path = repo.path.clone();
 
         Self::tree_row(
             SharedString::from(format!("repo:{}", repo.path)),
@@ -984,6 +1083,7 @@ impl HomeView {
                     ]),
             )
         })
+        .context_menu_items(move |_, cx| home_repository_menu(&menu_model, &menu_path, cx))
     }
 
     fn render_github(&mut self, cx: &mut Context<Self>) -> Div {
