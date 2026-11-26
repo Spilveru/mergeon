@@ -5,6 +5,13 @@ Los cambios notables de Mergeon se documentan en este archivo. El formato sigue
 
 ## [Sin publicar]
 
+## [0.15.1] — 2026-11-26
+
+### Corregido
+
+- **Atajos de teclado directos para Fetch / Pull / Push y opciones recordadas (#15):** los atajos de teclado de *Fetch*, *Pull* y *Push* ahora ejecutan directamente sin abrir el diálogo siempre que exista un destino seguro (cayendo al diálogo solo si falta remoto, upstream o `HEAD` está desanclado), usando las últimas opciones confirmadas en sus diálogos (`fetch.allRemotes`, `pull.rebase`, `pull.autostash`, `push.pushTags`; `force push` nunca se guarda por seguridad). Los botones de la barra de herramientas siguen abriendo el diálogo de opciones por defecto (o ejecutan directo si activas la opción en **Settings → Git**, donde ahora también puedes abrir opciones con **clic derecho** además de `Shift+clic`).
+- **Tecla `Enter` en diálogos y botones (#15):** corregido el bloqueo por el cual `Enter` no activaba botones enfocados (solo `Space`) ni enviaba los diálogos de *Fetch*, *Pull*, *Push*, *Create Branch* y *Stash*. Ahora `Enter` ejecuta la acción principal del diálogo (con envío idempotente) y, cuando el foco está en un botón concreto (incluido `Cancel` o la `X` de cierre, incluso en confirmaciones destructivas), activa exclusivamente ese botón.
+
 ## [0.15.0] — 2026-11-26
 
 ### Añadido

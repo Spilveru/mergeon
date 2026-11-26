@@ -1403,3 +1403,61 @@ async fn workspace_commands_create_switch_rename_and_delete_from_the_palette(
         assert_eq!(model.workspaces().len(), 1);
     });
 }
+
+#[gpui_kit::test]
+async fn keyboard_fetch_runs_directly_while_palette_fetch_opens_dialog_when_skip_is_off(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx, true);
+    let remote = tempfile::Builder::new()
+        .prefix("palette-kb-remote")
+        .tempdir()
+        .unwrap();
+    git(remote.path(), &["init", "--bare", "-q"]);
+    let dir = repository("palette-kb-fetch");
+    let remote_url = remote.path().to_string_lossy().into_owned();
+    git(dir.path(), &["remote", "add", "origin", &remote_url]);
+    git(dir.path(), &["push", "-q", "-u", "origin", "main"]);
+    harness.open(&dir, cx).await;
+
+    let model = harness.model.clone();
+    wait_until(cx, "remoto cargado", |cx| {
+        model.read_with(cx, |model, _| {
+            !model.repositories().active_repository_remotes().is_empty()
+        })
+    });
+    assert!(
+        !model.read_with(cx, |model, _| model.skip_action_dialogs()),
+        "skip_action_dialogs defaults to false"
+    );
+
+    // Keyboard shortcut (`secondary-shift-f`) executes Fetch directly without opening a dialog.
+    harness.events.borrow_mut().clear();
+    harness.in_window(cx, |window, cx| window.press("secondary-shift-f", cx));
+    wait_until(cx, "direct keyboard fetch recorded", |cx| {
+        model.read_with(cx, |model, _| {
+            model
+                .operations_log()
+                .entries
+                .iter()
+                .any(|entry| entry.operation.as_deref() == Some("fetch"))
+        })
+    });
+    assert!(
+        !harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Fetch)),
+        "keyboard Fetch should not open Fetch dialog when a remote exists"
+    );
+
+    // Command Palette "Fetch…" still opens the options dialog when skip_action_dialogs is false.
+    harness.events.borrow_mut().clear();
+    harness.run_command(cx, "Fetch…");
+    wait_until(cx, "diálogo Fetch desde la paleta", |_| {
+        harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Fetch))
+    });
+}

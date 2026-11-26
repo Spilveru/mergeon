@@ -145,7 +145,7 @@ fn run_now(action: ShortcutAction, cx: &mut App) {
         return;
     }
     if let Some(model) = AppModel::try_global(cx) {
-        model.update(cx, |model, cx| model.handle_shortcut(action, cx));
+        model.update(cx, |model, cx| model.handle_keyboard_shortcut(action, cx));
     }
 }
 

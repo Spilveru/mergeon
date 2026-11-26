@@ -660,6 +660,19 @@ impl AppModel {
         }
     }
 
+    /// Igual que [`Self::handle_shortcut`], pero para pulsaciones directas de
+    /// teclado: Fetch, Pull y Push corren inmediatamente con las opciones
+    /// recordadas (cayendo al diálogo solo cuando no hay destino seguro), sin
+    /// depender de `skip_action_dialogs`.
+    pub fn handle_keyboard_shortcut(&mut self, action: ShortcutAction, cx: &mut Context<Self>) {
+        match action {
+            ShortcutAction::Fetch => self.handle_fetch_direct(cx),
+            ShortcutAction::Pull => self.handle_pull_direct(cx),
+            ShortcutAction::Push => self.handle_push_direct(cx),
+            other => self.handle_shortcut(other, cx),
+        }
+    }
+
     /// `window.api.app.minimize()`: lo ejecuta la cáscara al recibir el evento.
     pub fn request_minimize(&mut self, cx: &mut Context<Self>) {
         cx.emit(AppEvent::Window(WindowRequest::Minimize));
@@ -1716,8 +1729,8 @@ impl AppModel {
         }
     }
 
-    /// Petición segura para ejecutar Fetch directamente (`all_remotes: true`
-    /// siempre que el repositorio activo tenga al menos un remoto).
+    /// Petición segura para ejecutar Fetch directamente (usando las opciones
+    /// recordadas siempre que el repositorio activo tenga al menos un remoto).
     pub(crate) fn direct_fetch_request(&self) -> Option<FetchRequest> {
         self.active_repository()?;
         if self.repositories.active_repository_remotes().is_empty() {
@@ -1725,13 +1738,13 @@ impl AppModel {
         }
         Some(FetchRequest {
             remote: self.default_remote_name(),
-            all_remotes: true,
+            all_remotes: self.settings.action_defaults.fetch.all_remotes,
         })
     }
 
     /// Petición segura para ejecutar Pull directamente: rama local (no HEAD
     /// desanclado), remoto por defecto válido y rama remota destino (upstream
-    /// configurado o rama homónima en ese remoto).
+    /// configurado o rama homónima en ese remoto), con las opciones recordadas.
     pub(crate) fn direct_pull_request(&self) -> Option<PullRequest> {
         self.active_repository()?;
         let current = self.active_repo_current_branch();
@@ -1760,13 +1773,14 @@ impl AppModel {
         Some(PullRequest {
             remote,
             branch: Some(branch),
-            rebase: false,
-            autostash: false,
+            rebase: self.settings.action_defaults.pull.rebase,
+            autostash: self.settings.action_defaults.pull.autostash,
         })
     }
 
     /// Petición segura para ejecutar Push directamente: rama local (no HEAD
-    /// desanclado) con upstream configurado. Nunca hace force push ni sube tags.
+    /// desanclado) con upstream configurado y las opciones recordadas. Nunca
+    /// hace force push.
     pub(crate) fn direct_push_request(&self) -> Option<PushRequest> {
         self.active_repository()?;
         let branch = self.active_repo_current_branch();
@@ -1782,54 +1796,78 @@ impl AppModel {
         Some(PushRequest {
             branch: branch.to_string(),
             destination: upstream,
-            push_tags: false,
+            push_tags: self.settings.action_defaults.push.push_tags,
             force: false,
         })
     }
 
-    /// `handleFetch`: ejecuta fetch directamente si `skip_action_dialogs` está
-    /// activo y existe al menos un remoto; si no, abre el diálogo de fetch.
-    pub fn handle_fetch(&mut self, cx: &mut Context<Self>) {
+    /// Ejecuta fetch directamente con las opciones recordadas si existe al
+    /// menos un remoto; si no, abre el diálogo de fetch.
+    pub fn handle_fetch_direct(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_none() {
             return;
         }
-        if self.settings.skip_action_dialogs
-            && let Some(request) = self.direct_fetch_request()
-        {
+        if let Some(request) = self.direct_fetch_request() {
             self.run_fetch(request, false, cx).detach();
             return;
         }
         self.open_fetch_dialog(cx);
     }
 
-    /// `handlePull`: ejecuta pull directamente si `skip_action_dialogs` está
-    /// activo y hay un destino seguro; si no, abre el diálogo de pull.
-    pub fn handle_pull(&mut self, cx: &mut Context<Self>) {
+    /// Ejecuta pull directamente con las opciones recordadas si hay un destino
+    /// seguro; si no, abre el diálogo de pull.
+    pub fn handle_pull_direct(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_none() {
             return;
         }
-        if self.settings.skip_action_dialogs
-            && let Some(request) = self.direct_pull_request()
-        {
+        if let Some(request) = self.direct_pull_request() {
             self.handle_pull_submit(request, cx).detach();
             return;
         }
         self.open_pull_dialog(cx);
     }
 
-    /// `handlePush`: ejecuta push directamente si `skip_action_dialogs` está
-    /// activo y la rama actual tiene upstream; si no, abre el diálogo de push.
-    pub fn handle_push(&mut self, cx: &mut Context<Self>) {
+    /// Ejecuta push directamente con las opciones recordadas si la rama actual
+    /// tiene upstream; si no, abre el diálogo de push.
+    pub fn handle_push_direct(&mut self, cx: &mut Context<Self>) {
         if self.active_repository().is_none() {
             return;
         }
-        if self.settings.skip_action_dialogs
-            && let Some(request) = self.direct_push_request()
-        {
+        if let Some(request) = self.direct_push_request() {
             self.handle_push_submit(request, cx).detach();
             return;
         }
         self.open_push_dialog(cx);
+    }
+
+    /// `handleFetch`: ejecuta fetch directamente si `skip_action_dialogs` está
+    /// activo y existe al menos un remoto; si no, abre el diálogo de fetch.
+    pub fn handle_fetch(&mut self, cx: &mut Context<Self>) {
+        if self.settings.skip_action_dialogs {
+            self.handle_fetch_direct(cx);
+        } else {
+            self.open_fetch_dialog(cx);
+        }
+    }
+
+    /// `handlePull`: ejecuta pull directamente si `skip_action_dialogs` está
+    /// activo y hay un destino seguro; si no, abre el diálogo de pull.
+    pub fn handle_pull(&mut self, cx: &mut Context<Self>) {
+        if self.settings.skip_action_dialogs {
+            self.handle_pull_direct(cx);
+        } else {
+            self.open_pull_dialog(cx);
+        }
+    }
+
+    /// `handlePush`: ejecuta push directamente si `skip_action_dialogs` está
+    /// activo y la rama actual tiene upstream; si no, abre el diálogo de push.
+    pub fn handle_push(&mut self, cx: &mut Context<Self>) {
+        if self.settings.skip_action_dialogs {
+            self.handle_push_direct(cx);
+        } else {
+            self.open_push_dialog(cx);
+        }
     }
 
     /// `promptForOriginRemote`: pide la URL del remoto y lo añade como

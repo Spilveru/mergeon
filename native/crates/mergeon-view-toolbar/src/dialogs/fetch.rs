@@ -28,7 +28,14 @@ impl FetchDialog {
     fn new(cx: &mut Context<Self>) -> Self {
         let model = AppModel::global(cx);
         // `defaultRemote || remotes[0]?.name || 'origin'` ya lo resuelve el modelo.
-        let selected_remote = model.read(cx).default_remote_name().into();
+        let (selected_remote, all_remotes, shown_remotes) = {
+            let model = model.read(cx);
+            (
+                model.default_remote_name().into(),
+                model.action_defaults().fetch.all_remotes,
+                remote_options(model),
+            )
+        };
         let observer = cx.observe(&model, |this: &mut Self, model, cx| {
             let remotes = remote_options(model.read(cx));
             if remotes != this.shown_remotes {
@@ -36,11 +43,10 @@ impl FetchDialog {
                 cx.notify();
             }
         });
-        let shown_remotes = remote_options(model.read(cx));
         Self {
             model,
             selected_remote,
-            all_remotes: true,
+            all_remotes,
             dialog_id: None,
             shown_remotes,
             _observer: observer,
@@ -62,14 +68,22 @@ impl FetchDialog {
         if !self.can_submit() {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let request = FetchRequest {
             remote: self.selected_remote.to_string(),
             all_remotes: self.all_remotes,
         };
         // `handleFetchSubmit`: primero se cierra, luego corre el fetch.
-        self.close(window, cx);
+        dialog::close_id(window, cx, id);
         self.model
-            .update(cx, |model, cx| model.handle_fetch_submit(request, cx))
+            .update(cx, |model, cx| {
+                model
+                    .remember_fetch_defaults(request.all_remotes, cx)
+                    .detach();
+                model.handle_fetch_submit(request, cx)
+            })
             .detach();
     }
 
@@ -168,6 +182,13 @@ pub fn open_fetch_dialog(window: &mut Window, cx: &mut App) -> Option<DialogId> 
         .footer({
             let form = form.clone();
             move |_, cx| FetchDialog::footer(&form, cx)
+        })
+        .on_confirm({
+            let form = form.clone();
+            move |window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            }
         })
         .open(window, cx);
     form.update(cx, |form, _| form.dialog_id = Some(id));

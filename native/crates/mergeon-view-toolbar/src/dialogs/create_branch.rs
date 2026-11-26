@@ -164,13 +164,16 @@ impl CreateBranchDialog {
         if !self.can_submit(cx) {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let submission = CreateBranchSubmission {
             branch_name: self.trimmed_name(cx),
             checkout_after_create: self.checkout_after_create,
             local_changes_mode: self.local_changes_mode,
         };
         let on_submit = self.on_submit.clone();
-        self.close(window, cx);
+        dialog::close_id(window, cx, id);
         match on_submit {
             Some(on_submit) => on_submit(submission, window, cx),
             None => AppModel::global(cx)
@@ -393,6 +396,13 @@ pub fn open_create_branch_dialog(
         .footer({
             let form = form.clone();
             move |_, cx| CreateBranchDialog::footer(&form, cx)
+        })
+        .on_confirm({
+            let form = form.clone();
+            move |window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            }
         })
         .open(window, cx);
     form.update(cx, |form, cx| {

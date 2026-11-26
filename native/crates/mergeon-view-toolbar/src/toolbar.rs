@@ -14,8 +14,9 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, TestSupportExt as _, Window, div, px,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    px,
 };
 use mergeon_app::AppModel;
 use mergeon_gitcmd::{ConflictState, OperationState};
@@ -171,20 +172,23 @@ impl ToolbarAction {
         self,
         shortcuts: &BTreeMap<String, String>,
         skip_action_dialogs: bool,
+        push_tags: bool,
         is_mac: bool,
     ) -> String {
-        let base = match self
+        let mut text = match self
             .shortcut()
             .and_then(|action| effective_combo_label(action, shortcuts, is_mac))
         {
             Some(keys) => format!("{} ({keys})", self.label()),
             None => self.label().to_string(),
         };
-        if skip_action_dialogs && matches!(self, Self::Fetch | Self::Pull | Self::Push) {
-            format!("{base} · Shift+click for options")
-        } else {
-            base
+        if self == Self::Push && push_tags {
+            text.push_str(" · +tags");
         }
+        if skip_action_dialogs && matches!(self, Self::Fetch | Self::Pull | Self::Push) {
+            text.push_str(" · Shift+click or right-click for options");
+        }
+        text
     }
 
     /// La operación de `busyToolbarOperation` que marca ocupado al botón. Las
@@ -237,6 +241,8 @@ struct ToolbarState {
     undo_running: bool,
     /// Si Fetch / Pull / Push ejecutan directamente sin diálogo.
     skip_action_dialogs: bool,
+    /// Si Push recuerda enviar tags (`action_defaults.push.push_tags`).
+    push_tags: bool,
     /// Atajos personalizados para los tooltips y el buscador.
     keyboard_shortcuts: BTreeMap<String, String>,
 }
@@ -262,6 +268,7 @@ impl ToolbarState {
             redo_label: model.undo_action_label(&repository.path, true),
             undo_running: model.is_undo_running(&repository.path),
             skip_action_dialogs: model.skip_action_dialogs(),
+            push_tags: model.action_defaults().push.push_tags,
             keyboard_shortcuts: model.keyboard_shortcuts().clone(),
         })
     }
@@ -296,6 +303,24 @@ impl ToolbarView {
         self.renders
     }
 
+    /// Texto de ayuda efectivo de Fetch / Pull / Push (tests).
+    #[doc(hidden)]
+    pub fn sync_button_tooltip(&self, id: &str) -> Option<String> {
+        let state = self.shown.as_ref()?;
+        let action = match id {
+            "toolbar-fetch" => ToolbarAction::Fetch,
+            "toolbar-pull" => ToolbarAction::Pull,
+            "toolbar-push" => ToolbarAction::Push,
+            _ => return None,
+        };
+        Some(action.tooltip(
+            &state.keyboard_shortcuts,
+            state.skip_action_dialogs,
+            state.push_tags,
+            cfg!(target_os = "macos"),
+        ))
+    }
+
     /// Recoge lo que la barra enseña del modelo y repinta si cambió.
     fn sync_shown(&mut self, cx: &mut Context<Self>) {
         let state = ToolbarState::read(self.model.read(cx));
@@ -324,6 +349,15 @@ impl ToolbarView {
             ToolbarAction::OpenEditor => model.handle_open_in_editor(cx).detach(),
             ToolbarAction::OpenTerminal => model.handle_open_terminal(cx).detach(),
             ToolbarAction::OpenExplorer => model.handle_open_explorer(cx).detach(),
+        });
+    }
+
+    fn open_options_dialog(&mut self, action: ToolbarAction, cx: &mut Context<Self>) {
+        self.model.update(cx, |model, cx| match action {
+            ToolbarAction::Fetch => model.open_fetch_dialog(cx),
+            ToolbarAction::Pull => model.open_pull_dialog(cx),
+            ToolbarAction::Push => model.open_push_dialog(cx),
+            _ => {}
         });
     }
 
@@ -413,7 +447,7 @@ impl ToolbarView {
         } else {
             plain_icon(action.icon(), 16.)
         };
-        let tooltip = action.tooltip(shortcuts, false, cfg!(target_os = "macos"));
+        let tooltip = action.tooltip(shortcuts, false, false, cfg!(target_os = "macos"));
         mergeon_ui::button(action.id())
             .ghost()
             .sm()
@@ -641,6 +675,10 @@ impl ToolbarView {
     ) -> mergeon_ui::Button {
         let inner_radius = (Radius::Md.px(cx) - px(1.)).max(px(0.));
         let (first, last) = edges;
+        let has_options_dialog = matches!(
+            action,
+            ToolbarAction::Fetch | ToolbarAction::Pull | ToolbarAction::Push
+        );
         mergeon_ui::button(action.id())
             .outline()
             .sm()
@@ -663,6 +701,18 @@ impl ToolbarView {
                     this.run(action, event.modifiers().shift, cx)
                 }),
             )
+            .when(has_options_dialog, |this| {
+                this.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        if disabled || busy {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.open_options_dialog(action, cx);
+                    }),
+                )
+            })
     }
 
     /// Abre la búsqueda de commits de la app (la del panel lateral), como
@@ -751,6 +801,7 @@ impl Render for ToolbarView {
             redo_label,
             undo_running,
             skip_action_dialogs,
+            push_tags,
             keyboard_shortcuts,
         }) = state
         else {
@@ -791,6 +842,7 @@ impl Render for ToolbarView {
             let tooltip = action.tooltip(
                 &keyboard_shortcuts,
                 skip_action_dialogs,
+                push_tags,
                 cfg!(target_os = "macos"),
             );
             sync_group = sync_group.child(Self::segment_button(
@@ -807,6 +859,7 @@ impl Render for ToolbarView {
         let stash_tooltip = ToolbarAction::Stash.tooltip(
             &keyboard_shortcuts,
             skip_action_dialogs,
+            false,
             cfg!(target_os = "macos"),
         );
         let stash_group = segmented_group(cx).child(Self::segment_button(
@@ -1108,5 +1161,46 @@ mod tests {
         let mut unborn = repository;
         unborn.current_branch = None;
         assert_eq!(toolbar_branch_label(&unborn), "HEAD");
+    }
+
+    #[test]
+    fn sync_tooltips_advertise_shift_and_right_click_in_direct_mode_and_push_tags() {
+        let shortcuts = BTreeMap::new();
+        for action in [
+            ToolbarAction::Fetch,
+            ToolbarAction::Pull,
+            ToolbarAction::Push,
+        ] {
+            let dialog_mode = action.tooltip(&shortcuts, false, false, false);
+            assert!(
+                !dialog_mode.contains("Shift+click or right-click for options"),
+                "{dialog_mode}"
+            );
+
+            let direct_mode = action.tooltip(&shortcuts, true, false, false);
+            assert!(
+                direct_mode.ends_with(" · Shift+click or right-click for options"),
+                "{direct_mode}"
+            );
+        }
+
+        assert!(
+            !ToolbarAction::Stash
+                .tooltip(&shortcuts, true, false, false)
+                .contains("Shift+click")
+        );
+
+        let push_with_tags = ToolbarAction::Push.tooltip(&shortcuts, true, true, false);
+        assert!(push_with_tags.contains(" · +tags"), "{push_with_tags}");
+        assert!(
+            push_with_tags.ends_with(" · Shift+click or right-click for options"),
+            "{push_with_tags}"
+        );
+
+        let fetch_with_push_tags = ToolbarAction::Fetch.tooltip(&shortcuts, true, true, false);
+        assert!(
+            !fetch_with_push_tags.contains("+tags"),
+            "{fetch_with_push_tags}"
+        );
     }
 }

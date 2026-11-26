@@ -759,7 +759,9 @@ impl Render for PreferencesPanel {
                         .child(
                             div().flex().child(
                                 mergeon_ui::checkbox("prefs-skip-action-dialogs")
-                                    .label("Run Fetch, Pull, and Push immediately without dialogs")
+                                    .label(
+                                        "Toolbar buttons run Fetch, Pull, and Push immediately (skip options dialog)",
+                                    )
                                     .checked(skip_action_dialogs)
                                     .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                         let checked = *checked;
@@ -772,7 +774,7 @@ impl Render for PreferencesPanel {
                             ),
                         )
                         .child(Self::hint(
-                            "Uses defaults and falls back to the dialog when no safe default exists (detached HEAD, missing upstream, or no remotes). Shift+click or the Command Palette still opens options.",
+                            "Keyboard shortcuts always run Fetch, Pull, and Push directly using your last confirmed options (falling back to the dialog when no safe target exists). Shift+click, right-click, or the Command Palette still opens options.",
                             cx,
                         )),
                 )

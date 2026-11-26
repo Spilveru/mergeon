@@ -342,6 +342,350 @@ async fn app_dialog_reports_dismissal_but_not_a_programmatic_close(cx: &mut Test
     });
 }
 
+/// Avanza el foco con Tab hasta que el control `id` lo reciba.
+fn focus_by_tab(window: &mut Window, cx: &mut App, id: &'static str) {
+    window.render_frame(cx);
+    for _ in 0..16 {
+        if window.find(id).focused() == Some(true) {
+            return;
+        }
+        window.focus_next(cx);
+        window.render_frame(cx);
+    }
+    panic!("no se pudo enfocar `{id}` con Tab");
+}
+
+#[gpui_kit::test]
+async fn enter_on_focused_cancel_button_cancels_a_confirm(cx: &mut TestAppContext) {
+    let window = open(cx, empty);
+    let answer = Rc::new(Cell::new(None));
+
+    in_window(cx, window, {
+        let answer = answer.clone();
+        move |window, cx| {
+            dialog::confirm(
+                window,
+                cx,
+                ConfirmOptions {
+                    variant: ConfirmVariant::Destructive,
+                    ..confirm_options("Delete branch")
+                },
+                move |ok, _, _| answer.set(Some(ok)),
+            );
+        }
+    });
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "confirm-cancel");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(answer.get(), Some(false));
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 0);
+    });
+}
+
+#[gpui_kit::test]
+async fn dialog_enter_confirms_from_root_and_from_a_checkbox(cx: &mut TestAppContext) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let submits = Rc::new(Cell::new(0usize));
+    let cancels = Rc::new(Cell::new(0usize));
+    let checked = Rc::new(Cell::new(false));
+    let checkbox_changes = Rc::new(Cell::new(0usize));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let submits = submits.clone();
+        let cancels = cancels.clone();
+        let checked = checked.clone();
+        let checkbox_changes = checkbox_changes.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("Fetch")
+                .body({
+                    let checked = checked.clone();
+                    let checkbox_changes = checkbox_changes.clone();
+                    move |_, _| {
+                        let checked = checked.clone();
+                        let checkbox_changes = checkbox_changes.clone();
+                        mergeon_ui::checkbox("dialog-prune")
+                            .label("Prune deleted branches")
+                            .checked(checked.get())
+                            .on_change(move |value, window, _| {
+                                checked.set(*value);
+                                checkbox_changes.set(checkbox_changes.get() + 1);
+                                window.refresh();
+                            })
+                    }
+                })
+                .footer({
+                    let cancels = cancels.clone();
+                    let submits = submits.clone();
+                    move |_, _| {
+                        let cancels = cancels.clone();
+                        let submits = submits.clone();
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                mergeon_ui::button("dialog-cancel")
+                                    .ghost()
+                                    .sm()
+                                    .label("Cancel")
+                                    .on_click(move |_, _, _| cancels.set(cancels.get() + 1)),
+                            )
+                            .child(
+                                mergeon_ui::button("dialog-submit")
+                                    .sm()
+                                    .label("Submit")
+                                    .on_click(move |_, _, _| submits.set(submits.get() + 1)),
+                            )
+                    }
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    false
+                })
+                .open(window, cx);
+        }
+    });
+
+    // Desde la raíz del diálogo, Enter ejecuta `on_confirm` una sola vez.
+    in_window(cx, window, |window, cx| window.press("enter", cx));
+    assert_eq!(confirms.get(), 1);
+    assert_eq!(submits.get(), 0);
+    assert_eq!(cancels.get(), 0);
+    assert_eq!(checkbox_changes.get(), 0);
+
+    // Con el foco en una casilla, Espacio la alterna y Enter sigue confirmando el diálogo.
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "dialog-prune");
+        window.press("space", cx);
+    });
+    assert!(checked.get());
+    assert_eq!(checkbox_changes.get(), 1);
+    assert_eq!(confirms.get(), 1);
+
+    in_window(cx, window, |window, cx| window.press("enter", cx));
+    assert_eq!(confirms.get(), 2);
+    assert_eq!(checkbox_changes.get(), 1);
+    assert_eq!(submits.get(), 0);
+    assert_eq!(cancels.get(), 0);
+}
+
+#[gpui_kit::test]
+async fn dialog_enter_and_space_on_focused_buttons_activate_only_that_button(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let submits = Rc::new(Cell::new(0usize));
+    let cancels = Rc::new(Cell::new(0usize));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let submits = submits.clone();
+        let cancels = cancels.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("Push")
+                .footer({
+                    let cancels = cancels.clone();
+                    let submits = submits.clone();
+                    move |_, _| {
+                        let cancels = cancels.clone();
+                        let submits = submits.clone();
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                mergeon_ui::button("dialog-cancel")
+                                    .ghost()
+                                    .sm()
+                                    .label("Cancel")
+                                    .on_click(move |_, _, _| cancels.set(cancels.get() + 1)),
+                            )
+                            .child(
+                                mergeon_ui::button("dialog-submit")
+                                    .sm()
+                                    .label("Submit")
+                                    .on_click(move |_, _, _| submits.set(submits.get() + 1)),
+                            )
+                    }
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    false
+                })
+                .open(window, cx);
+        }
+    });
+
+    // Enter en Submit solo ejecuta su `on_click` una vez, sin disparar `on_confirm`.
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "dialog-submit");
+        window.press("enter", cx);
+    });
+    assert_eq!(submits.get(), 1);
+    assert_eq!(confirms.get(), 0);
+    assert_eq!(cancels.get(), 0);
+
+    // Espacio sigue activando el botón enfocado.
+    in_window(cx, window, |window, cx| window.press("space", cx));
+    assert_eq!(submits.get(), 2);
+    assert_eq!(confirms.get(), 0);
+    assert_eq!(cancels.get(), 0);
+
+    // Enter en Cancel solo ejecuta `Cancel`, nunca `on_confirm`.
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "dialog-cancel");
+        window.press("enter", cx);
+    });
+    assert_eq!(cancels.get(), 1);
+    assert_eq!(submits.get(), 2);
+    assert_eq!(confirms.get(), 0);
+}
+
+#[gpui_kit::test]
+async fn dialog_enter_on_focused_close_button_dismisses_without_confirming(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let closed = Rc::new(Cell::new(0usize));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let closed = closed.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("Reset")
+                .footer(|_, _| {
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            mergeon_ui::button("dialog-cancel")
+                                .ghost()
+                                .sm()
+                                .label("Cancel"),
+                        )
+                        .child(mergeon_ui::button("dialog-submit").sm().label("Submit"))
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    true
+                })
+                .on_close(move |_, _| closed.set(closed.get() + 1))
+                .open(window, cx);
+        }
+    });
+
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "close");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(closed.get(), 1);
+    assert_eq!(confirms.get(), 0);
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 0);
+    });
+}
+
+#[gpui_kit::test]
+async fn dialog_select_enter_picks_option_without_confirming_or_closing(cx: &mut TestAppContext) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let chosen = Rc::new(RefCell::new(Vec::<SharedString>::new()));
+    let current = Rc::new(RefCell::new(SharedString::from("origin")));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let chosen = chosen.clone();
+        let current = current.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("Fetch")
+                .body({
+                    let chosen = chosen.clone();
+                    let current = current.clone();
+                    move |_, _| {
+                        let chosen = chosen.clone();
+                        let current = current.clone();
+                        let value = current.borrow().clone();
+                        mergeon_ui::select("dialog-remote")
+                            .items(["origin", "upstream", "fork"])
+                            .value(value)
+                            .on_change(move |value, window, _| {
+                                *current.borrow_mut() = value.clone();
+                                chosen.borrow_mut().push(value.clone());
+                                window.refresh();
+                            })
+                    }
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    true
+                })
+                .open(window, cx);
+        }
+    });
+
+    in_window(cx, window, |window, cx| window.click("dialog-remote", cx));
+    in_window(cx, window, |window, cx| {
+        assert_eq!(window.find("popup-menu").focused(), Some(true));
+        window.within("popup-menu").press("down", cx);
+        window.within("popup-menu").press("down", cx);
+        window.within("popup-menu").press("enter", cx);
+    });
+
+    assert_eq!(*chosen.borrow(), ["upstream"]);
+    assert_eq!(confirms.get(), 0);
+    in_window(cx, window, |window, cx| {
+        assert!(window.try_find("popup-menu").is_none());
+        assert_eq!(dialog::open_count(window, cx), 1);
+    });
+}
+
+#[gpui_kit::test]
+async fn reinit_after_clearing_key_bindings_preserves_button_enter_in_dialogs(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+    let answer = Rc::new(Cell::new(None));
+
+    cx.update(|cx| {
+        cx.clear_key_bindings();
+        mergeon_ui::init(cx);
+    });
+
+    in_window(cx, window, {
+        let answer = answer.clone();
+        move |window, cx| {
+            dialog::confirm(
+                window,
+                cx,
+                confirm_options("Delete tag"),
+                move |ok, _, _| answer.set(Some(ok)),
+            );
+        }
+    });
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "confirm-cancel");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(answer.get(), Some(false));
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 0);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // prompt
 // ---------------------------------------------------------------------------

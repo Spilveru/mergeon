@@ -41,10 +41,11 @@ pub use schema::{
     default_workspace_session, validate_config, validate_github_account,
 };
 pub use settings::{
-    CommitViewSettings, CommitViewUpdate, DEFAULT_AUTO_FETCH_INTERVAL_MINUTES,
-    DEFAULT_MAX_RECENT_REPOS, DiffViewMode, EXTERNAL_EDITOR_KEY, ExternalEditorSettings,
-    KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings, SettingsUpdate, SidebarSections,
-    SidebarSectionsUpdate, Theme,
+    ACTION_DEFAULTS_KEY, ActionDefaults, CommitViewSettings, CommitViewUpdate,
+    DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, DEFAULT_MAX_RECENT_REPOS, DiffViewMode,
+    EXTERNAL_EDITOR_KEY, ExternalEditorSettings, FetchActionDefaults, KEYBOARD_SHORTCUTS_KEY,
+    PullActionDefaults, PushActionDefaults, SKIP_ACTION_DIALOGS_KEY, Settings, SettingsUpdate,
+    SidebarSections, SidebarSectionsUpdate, Theme,
 };
 pub use store::{ElectronImport, LoadReport, LoadStatus, Store, StoreOptions};
 pub use types::{

@@ -78,6 +78,7 @@ pub fn init(cx: &mut App) {
         .try_global::<UiInitialized>()
         .map(|_| cx.theme().mode.is_dark());
     gpui_kit::init(cx);
+    button::init(cx);
     if existing_dark.is_none() {
         assets::register_fonts(cx);
         root::init(cx);

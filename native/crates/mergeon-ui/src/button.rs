@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, ClickEvent, ElementId, Hsla, InteractiveElement, Interactivity,
-    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
+    IntoElement, KeyBinding, MouseButton, NoAction, ParentElement, RenderOnce, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled, Window, black, div, rems,
     transparent_black, white,
 };
@@ -25,6 +25,15 @@ use gpui_kit::{
 use crate::spinner::{Spinner, SpinnerSize};
 use crate::style::{DISABLED_OPACITY, Radius, control_shadow, focus_ring_overlay};
 use crate::theme::{ActivePaletteExt as _, with_alpha};
+
+/// Contexto de teclado de los botones de Mergeon. Suprime el `Enter → Confirm`
+/// de un diálogo padre para que Enter active el botón enfocado en vez de
+/// disparar la acción por defecto del diálogo.
+pub(crate) const BUTTON_KEY_CONTEXT: &str = "MergeonButton";
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("enter", NoAction, Some(BUTTON_KEY_CONTEXT))]);
+}
 
 /// Variantes de `buttonVariants`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -522,7 +531,8 @@ impl RenderOnce for Button {
             })
             .whitespace_nowrap()
             .when(!inert, |this| {
-                this.cursor_pointer()
+                this.key_context(BUTTON_KEY_CONTEXT)
+                    .cursor_pointer()
                     .shadow(recipe.shadow.clone())
                     .hover(|style| {
                         let style = style.bg(recipe.hover_bg).border_color(recipe.hover_border);

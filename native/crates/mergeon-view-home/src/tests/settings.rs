@@ -340,6 +340,7 @@ async fn shortcuts_section_records_detects_conflicts_resets_and_syncs_help(
         assert_eq!(view.section(), SettingsSection::Shortcuts)
     });
     assert!(app.exists(cx, "shortcuts-panel"));
+    assert!(app.exists(cx, "shortcuts-direct-actions-note"));
     assert!(app.exists(cx, "shortcut-row-fetch"));
     assert!(app.exists(cx, "shortcut-row-pull"));
     assert!(!app.exists(cx, "shortcuts-conflict-banner"));

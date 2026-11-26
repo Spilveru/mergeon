@@ -318,6 +318,9 @@ impl StashDialog {
         if !self.can_submit() {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let message = self.message.read(cx).value().trim().to_string();
         let request = StashRequest {
             message: (!message.is_empty()).then_some(message),
@@ -326,7 +329,7 @@ impl StashDialog {
             keep_index: self.choice.keep_index,
             staged_only: self.choice.staged_only,
         };
-        self.close(window, cx);
+        dialog::close_id(window, cx, id);
         self.model
             .update(cx, |model, cx| model.handle_stash_submit(request, cx))
             .detach();
@@ -557,6 +560,13 @@ pub fn open_stash_dialog(
         .footer({
             let form = form.clone();
             move |_, cx| StashDialog::footer(&form, cx)
+        })
+        .on_confirm({
+            let form = form.clone();
+            move |window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            }
         })
         .open(window, cx);
     form.update(cx, |form, cx| {

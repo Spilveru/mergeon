@@ -531,11 +531,28 @@ impl Render for ShortcutsPanel {
             )
             .child(
                 div()
-                    .text_size(rems(0.75))
-                    .line_height(relative(1.5))
-                    .text_color(palette.muted_foreground)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
                     .child(
-                        "Click a shortcut to record a new key combination. Press Esc to cancel, or Backspace / Delete to unbind.",
+                        div()
+                            .text_size(rems(0.75))
+                            .line_height(relative(1.5))
+                            .text_color(palette.muted_foreground)
+                            .child(
+                                "Click a shortcut to record a new key combination. Press Esc to cancel, or Backspace / Delete to unbind.",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("shortcuts-direct-actions-note")
+                            .test_support()
+                            .text_size(rems(0.75))
+                            .line_height(relative(1.5))
+                            .text_color(palette.muted_foreground)
+                            .child(
+                                "Fetch, Pull, and Push shortcuts run immediately using your last confirmed dialog options (falling back to the dialog when no safe target exists).",
+                            ),
                     ),
             )
             .when_some(conflict_summary, |el, summary| {

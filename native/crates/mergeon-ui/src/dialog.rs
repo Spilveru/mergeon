@@ -46,7 +46,7 @@ use gpui_kit::{
 };
 
 use crate::Lucide;
-use crate::button::button;
+use crate::button::{BUTTON_KEY_CONTEXT, button};
 use crate::checkbox::checkbox;
 use crate::root::MergeonLayer;
 use crate::style::{MergeonStyled as _, Radius, dialog_shadow};
@@ -514,6 +514,7 @@ fn render_dialog(
             let dismiss = dismiss.clone();
             this.child(
                 BaseButton::new("close")
+                    .key_context(BUTTON_KEY_CONTEXT)
                     .accessibility_label("Close")
                     .absolute()
                     .right(px(10.))

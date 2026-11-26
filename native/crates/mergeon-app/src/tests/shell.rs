@@ -13,7 +13,10 @@ use mergeon_model::workspace_tabs::{CHANGES_TAB, FileTabDescriptor, WorkspaceSec
 use serde_json::json;
 
 use super::support::{TestApp, TestRepo};
-use crate::{AppEvent, AppModel, CHOOSE_EDITOR_ACTION, DialogRequest, PushRequest, WindowRequest};
+use crate::{
+    ActionDefaults, AppEvent, AppModel, CHOOSE_EDITOR_ACTION, DialogRequest, FetchActionDefaults,
+    FetchRequest, PullActionDefaults, PullRequest, PushActionDefaults, PushRequest, WindowRequest,
+};
 
 fn dialogs(app: &TestApp) -> Vec<DialogRequest> {
     app.events()
@@ -924,4 +927,248 @@ async fn custom_keyboard_shortcuts_persist_emit_events_and_reset(cx: &mut TestAp
             .keyboard_shortcuts
             .is_empty()
     );
+}
+
+#[gpui_kit::test]
+async fn keyboard_shortcuts_run_fetch_pull_push_directly_even_when_skip_action_dialogs_is_false(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+
+    // 1. Repository WITH origin and upstream:
+    //    Toolbar/palette paths (`handle_fetch`/`handle_shortcut`) open dialogs when skip is false.
+    let synced = TestRepo::new();
+    let origin = synced.add_bare_remote("origin");
+    synced.git(&["push", "-q", "-u", "origin", "main"]);
+    synced.commit_file("ahead.txt", "local\n", "Local commit");
+    app.open(&synced, cx).await;
+    app.clear_events();
+
+    app.model.update(cx, |model, cx| {
+        model.handle_fetch(cx);
+        model.handle_pull(cx);
+        model.handle_push(cx);
+        model.handle_shortcut(ShortcutAction::Fetch, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialogs(&app),
+        [
+            DialogRequest::Fetch,
+            DialogRequest::Pull,
+            DialogRequest::Push,
+            DialogRequest::Fetch,
+        ]
+    );
+
+    // 2. Keyboard shortcuts (`handle_keyboard_shortcut`) execute directly even with skip == false.
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Fetch, cx);
+    });
+    app.wait_for(cx, "direct keyboard fetch recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("fetch"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    let local_head = synced.head();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Push, cx);
+    });
+    app.wait_for(cx, "direct keyboard push updated origin", |_| {
+        super::support::git_in(&origin, &["rev-parse", "main"]).trim() == local_head
+    });
+    assert!(dialogs(&app).is_empty());
+
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Pull, cx);
+    });
+    app.wait_for(cx, "direct keyboard pull recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("pull"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    // 3. Unsafe targets still fall back to dialogs on keyboard shortcuts:
+    //    no remotes, branch without upstream, and detached HEAD.
+    let no_remote = TestRepo::new();
+    app.open(&no_remote, cx).await;
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Fetch, cx);
+        model.handle_keyboard_shortcut(ShortcutAction::Pull, cx);
+        model.handle_keyboard_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialogs(&app),
+        [
+            DialogRequest::Fetch,
+            DialogRequest::Pull,
+            DialogRequest::Push,
+        ]
+    );
+
+    app.model
+        .update(cx, |model, cx| model.select_repository_tab(0, cx));
+    cx.run_until_parked();
+    let repo_id = app
+        .model
+        .read_with(cx, |model, _| model.active_repository().unwrap().id.clone());
+
+    synced.git(&["checkout", "-q", "-b", "topic"]);
+    app.model
+        .update(cx, |model, cx| {
+            model.sync_repository_read_model(
+                repo_id.as_str(),
+                crate::SyncRequest::new()
+                    .status(true)
+                    .branches(true)
+                    .remotes(true),
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Pull, cx);
+        model.handle_keyboard_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(dialogs(&app), [DialogRequest::Pull, DialogRequest::Push]);
+
+    synced.git(&["checkout", "-q", "--detach"]);
+    app.model
+        .update(cx, |model, cx| {
+            model.sync_repository_read_model(
+                repo_id.as_str(),
+                crate::SyncRequest::new()
+                    .status(true)
+                    .branches(true)
+                    .remotes(true),
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Pull, cx);
+        model.handle_keyboard_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(dialogs(&app), [DialogRequest::Pull, DialogRequest::Push]);
+}
+
+#[gpui_kit::test]
+async fn remembered_action_defaults_persist_and_feed_direct_requests(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new();
+    let _origin = repo.add_bare_remote("origin");
+    repo.git(&["push", "-q", "-u", "origin", "main"]);
+    app.open(&repo, cx).await;
+
+    // Initial defaults: all_remotes = true, rebase/autostash/push_tags/force = false.
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(model.action_defaults(), ActionDefaults::default());
+        assert_eq!(
+            model.direct_fetch_request(),
+            Some(FetchRequest {
+                remote: "origin".to_string(),
+                all_remotes: true,
+            })
+        );
+        assert_eq!(
+            model.direct_pull_request(),
+            Some(PullRequest {
+                remote: "origin".to_string(),
+                branch: Some("main".to_string()),
+                rebase: false,
+                autostash: false,
+            })
+        );
+        assert_eq!(
+            model.direct_push_request(),
+            Some(PushRequest {
+                branch: "main".to_string(),
+                destination: "origin/main".to_string(),
+                push_tags: false,
+                force: false,
+            })
+        );
+    });
+
+    // Remember non-default options and verify persistence + direct request propagation.
+    app.model
+        .update(cx, |model, cx| model.remember_fetch_defaults(false, cx))
+        .await;
+    app.model
+        .update(cx, |model, cx| model.remember_pull_defaults(true, true, cx))
+        .await;
+    app.model
+        .update(cx, |model, cx| model.remember_push_defaults(true, cx))
+        .await;
+
+    let expected = ActionDefaults {
+        fetch: FetchActionDefaults { all_remotes: false },
+        pull: PullActionDefaults {
+            rebase: true,
+            autostash: true,
+        },
+        push: PushActionDefaults { push_tags: true },
+    };
+    assert_eq!(
+        app.model.read_with(cx, |model, _| model.action_defaults()),
+        expected
+    );
+    assert_eq!(
+        app.backend.storage().get_settings().action_defaults,
+        expected
+    );
+
+    // Force reload from storage to confirm `load_app_settings` restores `action_defaults`.
+    app.model
+        .update(cx, |model, cx| model.load_app_settings(true, cx))
+        .await;
+
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(model.action_defaults(), expected);
+        assert_eq!(
+            model.direct_fetch_request(),
+            Some(FetchRequest {
+                remote: "origin".to_string(),
+                all_remotes: false,
+            })
+        );
+        assert_eq!(
+            model.direct_pull_request(),
+            Some(PullRequest {
+                remote: "origin".to_string(),
+                branch: Some("main".to_string()),
+                rebase: true,
+                autostash: true,
+            })
+        );
+        assert_eq!(
+            model.direct_push_request(),
+            Some(PushRequest {
+                branch: "main".to_string(),
+                destination: "origin/main".to_string(),
+                push_tags: true,
+                force: false,
+            })
+        );
+    });
 }

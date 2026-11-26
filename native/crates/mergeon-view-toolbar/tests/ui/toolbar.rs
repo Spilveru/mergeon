@@ -805,3 +805,73 @@ async fn direct_mode_runs_toolbar_fetch_pull_push_immediately_and_shift_click_op
         assert!(app.dialogs(cx).is_empty());
     }
 }
+
+#[gpui_kit::test]
+async fn right_clicking_sync_buttons_opens_options_dialogs_in_direct_mode(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+
+    for (button, cancel, title) in [
+        ("toolbar-fetch", "fetch-cancel", "Fetch"),
+        ("toolbar-pull", "pull-cancel", "Pull"),
+        ("toolbar-push", "push-cancel", "Push"),
+    ] {
+        app.in_window(cx, |window, cx| window.right_click(button, cx));
+        assert_eq!(app.dialogs(cx), [title], "right-click on {button}");
+        app.click(cx, cancel);
+        assert!(app.dialogs(cx).is_empty());
+    }
+}
+
+#[gpui_kit::test]
+async fn direct_mode_tooltips_advertise_shift_and_right_click_for_options(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+
+    let tooltip = |app: &TestApp, cx: &mut TestAppContext, id: &str| {
+        app.in_window(cx, |_, _| {});
+        app.shell
+            .read_with(cx, |shell, cx| {
+                shell.toolbar.read(cx).sync_button_tooltip(id)
+            })
+            .unwrap_or_else(|| panic!("missing tooltip for {id}"))
+    };
+
+    for id in ["toolbar-fetch", "toolbar-pull", "toolbar-push"] {
+        let text = tooltip(&app, cx, id);
+        assert!(
+            !text.contains("Shift+click or right-click for options"),
+            "{id}: {text}"
+        );
+    }
+
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+
+    for id in ["toolbar-fetch", "toolbar-pull", "toolbar-push"] {
+        let text = tooltip(&app, cx, id);
+        assert!(
+            text.contains("Shift+click or right-click for options"),
+            "{id}: {text}"
+        );
+    }
+
+    app.model
+        .update(cx, |model, cx| model.remember_push_defaults(true, cx))
+        .await;
+
+    let push_tip = tooltip(&app, cx, "toolbar-push");
+    assert!(push_tip.contains("+tags"), "{push_tip}");
+    assert!(
+        push_tip.contains("Shift+click or right-click for options"),
+        "{push_tip}"
+    );
+    assert!(!tooltip(&app, cx, "toolbar-fetch").contains("+tags"));
+}

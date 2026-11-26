@@ -24,8 +24,9 @@ use mergeon_model::keyboard_shortcuts::{
 use mergeon_model::resizable_width::ResizableWidth;
 use mergeon_model::sidebar_width::{saved_sidebar_width, sidebar_width, sidebar_width_settings};
 use mergeon_store::{
-    DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, EXTERNAL_EDITOR_KEY, ExternalEditorSettings,
-    KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings, SidebarSections, Theme,
+    ActionDefaults, DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, EXTERNAL_EDITOR_KEY,
+    ExternalEditorSettings, KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings,
+    SettingsUpdate, SidebarSections, Theme,
 };
 use serde_json::{Value, json};
 
@@ -53,6 +54,9 @@ pub(crate) struct SettingsState {
     /// Ejecutar Fetch / Pull / Push directamente sin diálogo cuando hay valores
     /// por defecto seguros (`settings.skipActionDialogs`).
     pub skip_action_dialogs: bool,
+    /// Últimas opciones seguras confirmadas en los diálogos de Fetch / Pull / Push
+    /// (`settings.actionDefaults`).
+    pub action_defaults: ActionDefaults,
     /// Atajos de teclado personalizados (`settings.keyboardShortcuts`).
     pub keyboard_shortcuts: BTreeMap<String, String>,
     /// Preferencias de la pestaña "Local Changes".
@@ -107,6 +111,7 @@ impl Default for SettingsState {
             sidebar_sections: SidebarSections::default(),
             external_editor: ExternalEditorSettings::default(),
             skip_action_dialogs: false,
+            action_defaults: ActionDefaults::default(),
             keyboard_shortcuts: BTreeMap::new(),
             local_changes: LocalChangesPrefs::default(),
             local_changes_loaded: false,
@@ -265,6 +270,7 @@ impl AppModel {
                 );
                 this.settings.external_editor = settings.external_editor;
                 this.settings.skip_action_dialogs = settings.skip_action_dialogs;
+                this.settings.action_defaults = settings.action_defaults;
                 let shortcuts = normalize_overrides(&settings.keyboard_shortcuts);
                 let shortcuts_changed = shortcuts != this.settings.keyboard_shortcuts;
                 this.settings.keyboard_shortcuts = shortcuts;
@@ -322,6 +328,63 @@ impl AppModel {
             "Failed to save the direct actions setting",
             cx,
         )
+    }
+
+    // ------------------------------------------------------------------
+    // Opciones recordadas de Fetch / Pull / Push (`settings.actionDefaults`)
+    // ------------------------------------------------------------------
+
+    /// Últimas opciones seguras confirmadas para Fetch / Pull / Push.
+    pub fn action_defaults(&self) -> ActionDefaults {
+        self.settings.action_defaults
+    }
+
+    fn persist_action_defaults(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        cx.notify();
+        let update = SettingsUpdate {
+            action_defaults: Some(self.settings.action_defaults),
+            ..Default::default()
+        };
+        let patch = serde_json::to_value(&update).unwrap_or(Value::Null);
+        self.persist_settings(patch, "Failed to save action defaults", cx)
+    }
+
+    /// Recuerda las opciones seguras de Fetch y las persiste si cambiaron.
+    pub fn remember_fetch_defaults(
+        &mut self,
+        all_remotes: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        if self.settings.action_defaults.fetch.all_remotes == all_remotes {
+            return Task::ready(());
+        }
+        self.settings.action_defaults.fetch.all_remotes = all_remotes;
+        self.persist_action_defaults(cx)
+    }
+
+    /// Recuerda las opciones seguras de Pull y las persiste si cambiaron.
+    pub fn remember_pull_defaults(
+        &mut self,
+        rebase: bool,
+        autostash: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let pull = &mut self.settings.action_defaults.pull;
+        if pull.rebase == rebase && pull.autostash == autostash {
+            return Task::ready(());
+        }
+        pull.rebase = rebase;
+        pull.autostash = autostash;
+        self.persist_action_defaults(cx)
+    }
+
+    /// Recuerda las opciones seguras de Push y las persiste si cambiaron.
+    pub fn remember_push_defaults(&mut self, push_tags: bool, cx: &mut Context<Self>) -> Task<()> {
+        if self.settings.action_defaults.push.push_tags == push_tags {
+            return Task::ready(());
+        }
+        self.settings.action_defaults.push.push_tags = push_tags;
+        self.persist_action_defaults(cx)
     }
 
     // ------------------------------------------------------------------

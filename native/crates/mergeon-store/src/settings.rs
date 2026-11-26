@@ -130,6 +130,8 @@ pub const CHANGES_HINTS_DISMISSED_KEY: &str = "changesHintsDismissed";
 
 /// Clave de [`Settings::skip_action_dialogs`] dentro de `settings`.
 pub const SKIP_ACTION_DIALOGS_KEY: &str = "skipActionDialogs";
+/// Clave de [`Settings::action_defaults`] dentro de `settings`.
+pub const ACTION_DEFAULTS_KEY: &str = "actionDefaults";
 /// Clave de [`Settings::keyboard_shortcuts`] dentro de `settings`.
 pub const KEYBOARD_SHORTCUTS_KEY: &str = "keyboardShortcuts";
 
@@ -184,6 +186,17 @@ pub(crate) fn normalize_settings(settings: Option<&Value>) -> Value {
             normalized.insert(SKIP_ACTION_DIALOGS_KEY.into(), Value::Bool(true));
         } else {
             normalized.remove(SKIP_ACTION_DIALOGS_KEY);
+        }
+    }
+    if let Some(action_defaults) = prop(settings, ACTION_DEFAULTS_KEY) {
+        let cleaned = ActionDefaults::from_value(action_defaults);
+        if cleaned.is_default() {
+            normalized.remove(ACTION_DEFAULTS_KEY);
+        } else {
+            normalized.insert(
+                ACTION_DEFAULTS_KEY.into(),
+                serde_json::to_value(cleaned).unwrap_or(Value::Null),
+            );
         }
     }
     if let Some(shortcuts) = prop(settings, KEYBOARD_SHORTCUTS_KEY) {
@@ -517,6 +530,78 @@ impl ExternalEditorSettings {
     }
 }
 
+/// Opciones recordadas del diálogo de Fetch (`settings.actionDefaults.fetch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchActionDefaults {
+    pub all_remotes: bool,
+}
+
+impl Default for FetchActionDefaults {
+    fn default() -> Self {
+        Self { all_remotes: true }
+    }
+}
+
+/// Opciones recordadas del diálogo de Pull (`settings.actionDefaults.pull`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullActionDefaults {
+    pub rebase: bool,
+    pub autostash: bool,
+}
+
+/// Opciones recordadas del diálogo de Push (`settings.actionDefaults.push`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushActionDefaults {
+    pub push_tags: bool,
+}
+
+/// Opciones recordadas para Fetch / Pull / Push (`settings.actionDefaults`).
+///
+/// Solo guarda preferencias seguras (`allRemotes`, `rebase`, `autostash`,
+/// `pushTags`); nunca persiste `force`, `remote` ni `branch`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDefaults {
+    #[serde(default)]
+    pub fetch: FetchActionDefaults,
+    #[serde(default)]
+    pub pull: PullActionDefaults,
+    #[serde(default)]
+    pub push: PushActionDefaults,
+}
+
+impl ActionDefaults {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Lectura tolerante: lo que falte o no sea un objeto toma su default
+    /// (`fetch.allRemotes = true`, el resto `false`). Nunca persiste ni lee
+    /// `force`, `remote` ni `branch`.
+    pub fn from_value(value: &Value) -> Self {
+        let value = Some(value);
+        let fetch = prop(value, "fetch");
+        let pull = prop(value, "pull");
+        let push = prop(value, "push");
+        let defaults = Self::default();
+        Self {
+            fetch: FetchActionDefaults {
+                all_remotes: bool_or(prop(fetch, "allRemotes"), defaults.fetch.all_remotes),
+            },
+            pull: PullActionDefaults {
+                rebase: bool_or(prop(pull, "rebase"), defaults.pull.rebase),
+                autostash: bool_or(prop(pull, "autostash"), defaults.pull.autostash),
+            },
+            push: PushActionDefaults {
+                push_tags: bool_or(prop(push, "pushTags"), defaults.push.push_tags),
+            },
+        }
+    }
+}
+
 /// Ajustes de la aplicación (`settings`), ya normalizados.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -543,6 +628,9 @@ pub struct Settings {
     /// valores seguros por defecto.
     #[serde(skip_serializing_if = "is_false")]
     pub skip_action_dialogs: bool,
+    /// Últimas opciones seguras confirmadas en los diálogos de Fetch / Pull / Push.
+    #[serde(skip_serializing_if = "ActionDefaults::is_default")]
+    pub action_defaults: ActionDefaults,
     /// Atajos de teclado personalizados (`action_id -> combo`, `""` = sin asignar).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keyboard_shortcuts: BTreeMap<String, String>,
@@ -563,6 +651,7 @@ impl Default for Settings {
             commit_view: CommitViewSettings::default(),
             external_editor: ExternalEditorSettings::default(),
             skip_action_dialogs: false,
+            action_defaults: ActionDefaults::default(),
             keyboard_shortcuts: BTreeMap::new(),
             extra: Map::new(),
         }
@@ -570,7 +659,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const KNOWN: [&'static str; 10] = [
+    const KNOWN: [&'static str; 11] = [
         "theme",
         "autoFetch",
         "autoFetchIntervalMinutes",
@@ -580,6 +669,7 @@ impl Settings {
         "commitView",
         EXTERNAL_EDITOR_KEY,
         SKIP_ACTION_DIALOGS_KEY,
+        ACTION_DEFAULTS_KEY,
         KEYBOARD_SHORTCUTS_KEY,
     ];
 
@@ -613,6 +703,9 @@ impl Settings {
                 .map(ExternalEditorSettings::from_value)
                 .unwrap_or_default(),
             skip_action_dialogs: bool_or(prop(value, SKIP_ACTION_DIALOGS_KEY), false),
+            action_defaults: prop(value, ACTION_DEFAULTS_KEY)
+                .map(ActionDefaults::from_value)
+                .unwrap_or_default(),
             keyboard_shortcuts: prop(value, KEYBOARD_SHORTCUTS_KEY)
                 .map(normalize_keyboard_shortcuts)
                 .unwrap_or_default(),
@@ -677,6 +770,8 @@ pub struct SettingsUpdate {
     pub external_editor: Option<ExternalEditorSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_action_dialogs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_defaults: Option<ActionDefaults>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyboard_shortcuts: Option<BTreeMap<String, String>>,
     /// Otras claves a guardar tal cual.
@@ -1103,5 +1198,104 @@ mod tests {
         );
         assert!(cleared.get(SKIP_ACTION_DIALOGS_KEY).is_none());
         assert!(cleared.get(KEYBOARD_SHORTCUTS_KEY).is_none());
+    }
+
+    #[test]
+    fn action_defaults_are_omitted_at_default_round_trip_and_normalize_leniently() {
+        // Default Settings omits actionDefaults so parity JSON stays identical.
+        assert_eq!(
+            Settings::default().action_defaults,
+            ActionDefaults::default()
+        );
+        assert!(ActionDefaults::default().is_default());
+        assert!(ActionDefaults::default().fetch.all_remotes);
+        assert!(!ActionDefaults::default().pull.rebase);
+        assert!(!ActionDefaults::default().pull.autostash);
+        assert!(!ActionDefaults::default().push.push_tags);
+        let default_json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(default_json.get(ACTION_DEFAULTS_KEY).is_none());
+        assert!(normalize_settings(None).get(ACTION_DEFAULTS_KEY).is_none());
+        assert_eq!(default_json, default_settings());
+
+        // Round-trip non-default ActionDefaults through SettingsUpdate and merge_settings_update.
+        let custom = ActionDefaults {
+            fetch: FetchActionDefaults { all_remotes: false },
+            pull: PullActionDefaults {
+                rebase: true,
+                autostash: true,
+            },
+            push: PushActionDefaults { push_tags: true },
+        };
+        assert!(!custom.is_default());
+        let update = SettingsUpdate {
+            action_defaults: Some(custom),
+            ..Default::default()
+        };
+        let merged = merge_settings_update(
+            &normalize_settings(None),
+            &serde_json::to_value(&update).unwrap(),
+        );
+        assert_eq!(
+            merged[ACTION_DEFAULTS_KEY],
+            json!({
+                "fetch": { "allRemotes": false },
+                "pull": { "rebase": true, "autostash": true },
+                "push": { "pushTags": true }
+            })
+        );
+        let read_back = Settings::from_value(&merged);
+        assert_eq!(read_back.action_defaults, custom);
+        assert!(!read_back.extra.contains_key(ACTION_DEFAULTS_KEY));
+        let reserialized = serde_json::to_value(&read_back).unwrap();
+        assert_eq!(
+            reserialized[ACTION_DEFAULTS_KEY],
+            merged[ACTION_DEFAULTS_KEY]
+        );
+
+        // Resetting back to defaults removes the actionDefaults key cleanly.
+        let reset = SettingsUpdate {
+            action_defaults: Some(ActionDefaults::default()),
+            ..Default::default()
+        };
+        let cleared = merge_settings_update(&merged, &serde_json::to_value(&reset).unwrap());
+        assert!(cleared.get(ACTION_DEFAULTS_KEY).is_none());
+        assert_eq!(
+            Settings::from_value(&cleared).action_defaults,
+            ActionDefaults::default()
+        );
+
+        // Lenient normalization of partial/malformed JSON and ignoring unsafe/unknown keys.
+        let malformed = normalize_settings(Some(&json!({
+            "actionDefaults": {
+                "fetch": "not-an-object",
+                "pull": { "rebase": 1, "branch": "main" },
+                "push": { "pushTags": "yes", "force": true, "remote": "origin" }
+            }
+        })));
+        assert_eq!(
+            malformed[ACTION_DEFAULTS_KEY],
+            json!({
+                "fetch": { "allRemotes": true },
+                "pull": { "rebase": true, "autostash": false },
+                "push": { "pushTags": true }
+            })
+        );
+        let parsed = Settings::from_value(&malformed).action_defaults;
+        assert!(parsed.fetch.all_remotes);
+        assert!(parsed.pull.rebase);
+        assert!(!parsed.pull.autostash);
+        assert!(parsed.push.push_tags);
+
+        // Completely invalid value normalizes to defaults and omits the key.
+        let bogus = normalize_settings(Some(&json!({ "actionDefaults": 123 })));
+        assert!(bogus.get(ACTION_DEFAULTS_KEY).is_none());
+        assert_eq!(
+            ActionDefaults::from_value(&json!(null)),
+            ActionDefaults::default()
+        );
+        assert_eq!(
+            ActionDefaults::from_value(&json!({})),
+            ActionDefaults::default()
+        );
     }
 }

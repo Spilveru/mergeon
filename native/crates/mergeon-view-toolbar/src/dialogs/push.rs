@@ -77,12 +77,18 @@ impl PushDialog {
         });
         // `currentBranch || branches[0]?.name || ''`: la rama actual nunca
         // llega vacía (sin rama es `HEAD`).
-        let selected_local_branch = model.read(cx).active_repo_current_branch().to_string();
+        let (selected_local_branch, push_all_tags) = {
+            let model = model.read(cx);
+            (
+                model.active_repo_current_branch().to_string(),
+                model.action_defaults().push.push_tags,
+            )
+        };
         let mut this = Self {
             model,
             selected_local_branch: selected_local_branch.into(),
             selected_destination: SharedString::default(),
-            push_all_tags: false,
+            push_all_tags,
             force_push: false,
             destinations: Vec::new(),
             dialog_id: None,
@@ -135,15 +141,21 @@ impl PushDialog {
         if !self.can_submit() {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let request = PushRequest {
             branch: self.selected_local_branch.to_string(),
             destination: self.selected_destination.to_string(),
             push_tags: self.push_all_tags,
             force: self.force_push,
         };
-        self.close(window, cx);
+        dialog::close_id(window, cx, id);
         self.model
-            .update(cx, |model, cx| model.handle_push_submit(request, cx))
+            .update(cx, |model, cx| {
+                model.remember_push_defaults(request.push_tags, cx).detach();
+                model.handle_push_submit(request, cx)
+            })
             .detach();
     }
 
@@ -270,6 +282,13 @@ pub fn open_push_dialog(window: &mut Window, cx: &mut App) -> Option<DialogId> {
         .footer({
             let form = form.clone();
             move |_, cx| PushDialog::footer(&form, cx)
+        })
+        .on_confirm({
+            let form = form.clone();
+            move |window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            }
         })
         .open(window, cx);
     form.update(cx, |form, _| form.dialog_id = Some(id));

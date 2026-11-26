@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::TestAppContext;
 use gpui_kit::test::TestWindowExt as _;
-use mergeon_app::{AppModel, CreateBranchSubmission, DialogRequest, LocalChangesMode};
+use mergeon_app::{AppModel, CreateBranchSubmission, DialogRequest, LocalChangesMode, SyncRequest};
 use mergeon_model::notify::NotifyType;
 use mergeon_model::operation_types::OperationResult;
 use mergeon_view_toolbar::{
@@ -19,13 +19,34 @@ use crate::support::{TestApp, TestRepo};
 
 /// La operación ya tiene resultado en el log de la sesión.
 fn logged(model: &AppModel, operation: &str) -> bool {
-    model.operations_log().entries.iter().any(|entry| {
-        entry.operation.as_deref() == Some(operation)
-            && entry
-                .outcome
-                .as_deref()
-                .is_some_and(|outcome| !outcome.is_empty())
-    })
+    logged_count(model, operation) > 0
+}
+
+/// Cuántas operaciones terminadas hay registradas de ese tipo.
+fn logged_count(model: &AppModel, operation: &str) -> usize {
+    model
+        .operations_log()
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.operation.as_deref() == Some(operation)
+                && entry
+                    .outcome
+                    .as_deref()
+                    .is_some_and(|outcome| !outcome.is_empty())
+        })
+        .count()
+}
+
+/// Avanza el foco con Tab hasta llegar al control `id`.
+fn tab_to(app: &TestApp, cx: &mut TestAppContext, id: &'static str) {
+    for _ in 0..16 {
+        if app.in_window(cx, |window, _| window.find(id).focused() == Some(true)) {
+            return;
+        }
+        app.in_window(cx, |window, cx| window.press("tab", cx));
+    }
+    panic!("could not tab to `{id}`");
 }
 
 // ---------------------------------------------------------------------------
@@ -965,4 +986,298 @@ async fn cancelling_stash_saves_nothing(cx: &mut TestAppContext) {
     assert!(app.dialogs(cx).is_empty());
     assert!(repo.git(&["stash", "list"]).is_empty());
     assert!(!app.model.read_with(cx, |model, _| logged(model, "stash")));
+}
+
+// ---------------------------------------------------------------------------
+// Enter, foco por teclado y recordar opciones (Issue #15)
+// ---------------------------------------------------------------------------
+
+#[gpui_kit::test]
+async fn enter_submits_fetch_pull_and_push_dialogs(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    repo.commit_file("CHANGELOG.md", "# Changelog\n", "Add changelog");
+    repo.git(&["push", "-q", "origin", "main"]);
+    let published = repo.head();
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    app.open(&repo, cx).await;
+
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    assert!(app.dialogs(cx).is_empty());
+    app.wait_for(cx, "the fetch to be logged", |model| logged(model, "fetch"));
+    app.wait_for(cx, "the fetch to settle", |model| {
+        model.busy_toolbar_operation().is_none()
+    });
+
+    app.in_window(cx, |window, cx| {
+        open_pull_dialog(window, cx);
+    });
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    assert!(app.dialogs(cx).is_empty());
+    app.wait_until(cx, "the pull to fast-forward main", || {
+        repo.head() == published
+    });
+    app.wait_for(cx, "the pull to settle", |model| {
+        model.busy_toolbar_operation().is_none()
+    });
+
+    repo.commit_file("NOTES.md", "notes\n", "Add notes");
+    let head = repo.head();
+    app.in_window(cx, |window, cx| {
+        open_push_dialog(window, cx);
+    });
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    assert!(app.dialogs(cx).is_empty());
+    app.wait_until(cx, "the push to reach origin", || {
+        repo.origin_ref("main").as_deref() == Some(head.as_str())
+    });
+}
+
+#[gpui_kit::test]
+async fn tabbing_to_fetch_submit_and_pressing_enter_submits_once(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+
+    tab_to(&app, cx, "fetch-submit");
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+
+    assert!(app.dialogs(cx).is_empty());
+    app.wait_for(cx, "the fetch to be logged", |model| logged(model, "fetch"));
+    app.wait_for(cx, "the fetch to settle", |model| {
+        model.busy_toolbar_operation().is_none()
+    });
+    assert_eq!(
+        app.model
+            .read_with(cx, |model, _| logged_count(model, "fetch")),
+        1
+    );
+}
+
+#[gpui_kit::test]
+async fn tabbing_to_fetch_cancel_and_pressing_enter_closes_without_fetching(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+
+    tab_to(&app, cx, "fetch-cancel");
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+
+    assert!(app.dialogs(cx).is_empty());
+    assert!(!app.model.read_with(cx, |model, _| logged(model, "fetch")));
+    assert_eq!(
+        app.model
+            .read_with(cx, |model, _| model.busy_toolbar_operation()),
+        None
+    );
+}
+
+#[gpui_kit::test]
+async fn fetch_remembers_all_remotes_on_confirm_and_not_on_cancel(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+
+    // Cancelar tras cambiar la casilla no guarda nada.
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+    app.click(cx, "fetch-all-remotes");
+    assert_eq!(checked(&app, cx, "fetch-all-remotes"), Some(false));
+    app.click(cx, "fetch-cancel");
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.action_defaults().fetch.all_remotes)
+    );
+
+    // Confirmar con `all_remotes = false` lo recuerda al reabrir.
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+    assert_eq!(checked(&app, cx, "fetch-all-remotes"), Some(true));
+    app.click(cx, "fetch-all-remotes");
+    app.click(cx, "fetch-submit");
+    app.wait_for(cx, "the fetch to be logged", |model| logged(model, "fetch"));
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.action_defaults().fetch.all_remotes)
+    );
+
+    // Al reabrir llega desmarcado; volver a marcar y cancelar no lo pisa.
+    app.in_window(cx, |window, cx| {
+        open_fetch_dialog(window, cx);
+    });
+    assert_eq!(checked(&app, cx, "fetch-all-remotes"), Some(false));
+    app.click(cx, "fetch-all-remotes");
+    assert_eq!(checked(&app, cx, "fetch-all-remotes"), Some(true));
+    app.click(cx, "fetch-cancel");
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.action_defaults().fetch.all_remotes)
+    );
+}
+
+#[gpui_kit::test]
+async fn pull_remembers_rebase_and_model_sync_preserves_it(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    let repo_id = app.open(&repo, cx).await;
+
+    // Cancelar no guarda la preferencia.
+    app.in_window(cx, |window, cx| {
+        open_pull_dialog(window, cx);
+    });
+    app.click(cx, "pull-rebase");
+    assert_eq!(checked(&app, cx, "pull-rebase"), Some(true));
+    app.click(cx, "pull-cancel");
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.action_defaults().pull.rebase)
+    );
+
+    // Confirmar recuerda `rebase = true`.
+    app.in_window(cx, |window, cx| {
+        open_pull_dialog(window, cx);
+    });
+    assert_eq!(checked(&app, cx, "pull-rebase"), Some(false));
+    app.click(cx, "pull-rebase");
+    app.click(cx, "pull-submit");
+    app.wait_for(cx, "the pull to be logged", |model| logged(model, "pull"));
+    app.wait_for(cx, "the pull to settle", |model| {
+        model.busy_toolbar_operation().is_none()
+    });
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.action_defaults().pull.rebase)
+    );
+
+    // Al reabrir llega marcado y un refresco de rama/destino no lo borra.
+    app.in_window(cx, |window, cx| {
+        open_pull_dialog(window, cx);
+    });
+    assert_eq!(checked(&app, cx, "pull-rebase"), Some(true));
+
+    repo.git(&["checkout", "-q", "-b", "topic"]);
+    repo.git(&["push", "-q", "-u", "origin", "topic"]);
+    app.model
+        .update(cx, |model, cx| {
+            model.sync_repository_read_model(
+                repo_id.as_str(),
+                SyncRequest::new().status(true).branches(true).remotes(true),
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+
+    app.in_window(cx, |window, _| {
+        assert_eq!(window.find("pull-branch").label(), Some("topic"));
+        assert_eq!(window.find("pull-rebase").checked(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+async fn push_remembers_push_tags_and_resets_force_push(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    repo.commit_file("CHANGELOG.md", "# Changelog\n", "Add changelog");
+    app.open(&repo, cx).await;
+
+    // Cancelar no guarda `push_tags`.
+    app.in_window(cx, |window, cx| {
+        open_push_dialog(window, cx);
+    });
+    app.click(cx, "push-tags");
+    app.click(cx, "push-force");
+    app.click(cx, "push-cancel");
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.action_defaults().push.push_tags)
+    );
+
+    // Confirmar con ambos marcados solo recuerda `push_tags`, nunca `force`.
+    app.in_window(cx, |window, cx| {
+        open_push_dialog(window, cx);
+    });
+    app.click(cx, "push-tags");
+    app.click(cx, "push-force");
+    assert_eq!(checked(&app, cx, "push-tags"), Some(true));
+    assert_eq!(checked(&app, cx, "push-force"), Some(true));
+    app.click(cx, "push-submit");
+
+    let head = repo.head();
+    app.wait_until(cx, "the push to reach origin", || {
+        repo.origin_ref("main").as_deref() == Some(head.as_str())
+    });
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.action_defaults().push.push_tags)
+    );
+
+    app.in_window(cx, |window, cx| {
+        open_push_dialog(window, cx);
+    });
+    assert_eq!(checked(&app, cx, "push-tags"), Some(true));
+    assert_eq!(checked(&app, cx, "push-force"), Some(false));
+}
+
+#[gpui_kit::test]
+async fn enter_in_create_branch_from_another_control_submits_once(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let submissions = open_create_branch(
+        &app,
+        cx,
+        CreateBranchDialogOptions::new("main").suggested_name("feature/enter"),
+    );
+
+    tab_to(&app, cx, "create-branch-checkout");
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+
+    assert_eq!(submissions.borrow().len(), 1);
+    assert_eq!(submissions.borrow()[0].branch_name, "feature/enter");
+    assert!(app.dialogs(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn enter_in_stash_submits_once(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new();
+    repo.write("README.md", "# Demo\n\nWork in progress.\n");
+    app.open(&repo, cx).await;
+    app.in_window(cx, |window, cx| {
+        open_stash_dialog(Vec::new(), window, cx);
+    });
+
+    app.in_window(cx, |window, cx| window.input("WIP enter", cx));
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+
+    assert!(app.dialogs(cx).is_empty());
+    app.wait_until(cx, "the stash", || !repo.git(&["stash", "list"]).is_empty());
+    app.wait_for(cx, "the stash to settle", |model| {
+        model.busy_toolbar_operation().is_none()
+    });
+    let stashes = repo.git(&["stash", "list"]);
+    assert_eq!(stashes.lines().count(), 1, "{stashes}");
+    assert!(stashes.contains("WIP enter"), "{stashes}");
+    assert_eq!(
+        app.model
+            .read_with(cx, |model, _| logged_count(model, "stash")),
+        1
+    );
+    assert!(
+        app.host.messages(NotifyType::Error).is_empty(),
+        "{:?}",
+        app.host.messages(NotifyType::Error)
+    );
 }

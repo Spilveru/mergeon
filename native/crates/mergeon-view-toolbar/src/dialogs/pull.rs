@@ -56,6 +56,7 @@ fn remote_branch_options(model: &AppModel, remote: &str) -> Vec<SharedString> {
 impl PullDialog {
     fn new(cx: &mut Context<Self>) -> Self {
         let model = AppModel::global(cx);
+        let pull_defaults = model.read(cx).action_defaults().pull;
         let observer = cx.observe(&model, |this: &mut Self, _, cx| {
             this.sync_with_model(cx);
             cx.notify();
@@ -64,14 +65,14 @@ impl PullDialog {
             model,
             selected_remote: SharedString::default(),
             selected_remote_branch: SharedString::default(),
-            rebase_instead_of_merge: false,
-            stash_and_reapply: false,
+            rebase_instead_of_merge: pull_defaults.rebase,
+            stash_and_reapply: pull_defaults.autostash,
             defaults: Default::default(),
             branch_options: Vec::new(),
             dialog_id: None,
             _observer: observer,
         };
-        this.reset(cx);
+        this.reset_target(cx);
         this
     }
 
@@ -83,15 +84,14 @@ impl PullDialog {
         )
     }
 
-    /// Lo que hacía el `watch` de `visible` y de los valores por defecto.
-    fn reset(&mut self, cx: &App) {
+    /// Actualiza remoto y rama destino cuando cambian los valores por defecto
+    /// del repositorio, sin pisar las opciones elegidas o recordadas.
+    fn reset_target(&mut self, cx: &App) {
         let defaults = self.current_defaults(cx);
         self.selected_remote = defaults.0.clone().into();
         // `defaultRemoteBranch || currentBranch || ''`: el modelo ya cae en la
         // rama actual cuando no hay upstream.
         self.selected_remote_branch = defaults.1.clone().into();
-        self.rebase_instead_of_merge = false;
-        self.stash_and_reapply = false;
         self.defaults = defaults;
         self.branch_options = remote_branch_options(self.model.read(cx), &self.selected_remote);
     }
@@ -111,7 +111,7 @@ impl PullDialog {
 
     fn sync_with_model(&mut self, cx: &App) {
         if self.current_defaults(cx) != self.defaults {
-            self.reset(cx);
+            self.reset_target(cx);
         } else {
             self.sync_branch_options(cx);
         }
@@ -132,15 +132,23 @@ impl PullDialog {
         if !self.can_submit() {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let request = PullRequest {
             remote: self.selected_remote.to_string(),
             branch: Some(self.selected_remote_branch.to_string()),
             rebase: self.rebase_instead_of_merge,
             autostash: self.stash_and_reapply,
         };
-        self.close(window, cx);
+        dialog::close_id(window, cx, id);
         self.model
-            .update(cx, |model, cx| model.handle_pull_submit(request, cx))
+            .update(cx, |model, cx| {
+                model
+                    .remember_pull_defaults(request.rebase, request.autostash, cx)
+                    .detach();
+                model.handle_pull_submit(request, cx)
+            })
             .detach();
     }
 
@@ -251,7 +259,7 @@ impl Render for PullDialog {
                         mergeon_ui::checkbox("pull-autostash")
                             .label("Stash and reapply local changes")
                             .checked(self.stash_and_reapply)
-                            .disabled(!has_local_changes)
+                            .disabled(!has_local_changes && !self.stash_and_reapply)
                             .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                 this.stash_and_reapply = *checked;
                                 cx.notify();
@@ -283,6 +291,13 @@ pub fn open_pull_dialog(window: &mut Window, cx: &mut App) -> Option<DialogId> {
         .footer({
             let form = form.clone();
             move |_, cx| PullDialog::footer(&form, cx)
+        })
+        .on_confirm({
+            let form = form.clone();
+            move |window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            }
         })
         .open(window, cx);
     form.update(cx, |form, _| form.dialog_id = Some(id));
