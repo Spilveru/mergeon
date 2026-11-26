@@ -5,6 +5,14 @@ Los cambios notables de Mergeon se documentan en este archivo. El formato sigue
 
 ## [Sin publicar]
 
+## [0.15.0] — 2026-11-26
+
+### Añadido
+
+- **Atajos de teclado personalizables (#13):** nueva sección **Settings → Shortcuts** (accesible también con `Ctrl+/` / `⌘/`) con búsqueda, grabación de combinaciones al hacer clic (con soporte de flechas, teclas de función y puntuación), detección de conflictos en línea y por banner, desvinculación y restauración individual o global. Los cambios se aplican en vivo sin reiniciar y se reflejan en la paleta de comandos, tooltips y ayuda.
+- **Ejecución directa de Fetch / Pull / Push sin diálogo (#13):** nueva opción en **Settings → Git** (*"Run Fetch, Pull, and Push immediately without dialogs"*) para ejecutar *Fetch*, *Pull* y *Push* al instante con los valores por defecto desde atajos o la barra de herramientas, con respaldo automático al diálogo si no existe un valor seguro (sin remotos, sin upstream o `HEAD` desanclado). `Shift+clic` en la barra o los comandos `… (options)` de la paleta siguen abriendo el diálogo.
+- **Workspaces / Grupos de repositorios (#14):** agrupa repositorios en workspaces con nombre para que la barra de pestañas y la navegación por teclado (`Ctrl+Tab`, `Ctrl+1..9`) muestren solo las pestañas del grupo activo, conservando intacto el estado de cada repositorio al cambiar. Divulgación progresiva (sin ruido visual si no creas grupos), selector compacto en la barra de título, submenú **Workspaces ▸** en el clic derecho de pestañas y de filas de repositorios en **Home**, sección `Workspaces` en Home y comandos en la paleta (`Switch / Create / Rename / Delete workspace`).
+
 ## [0.14.0] — 2026-11-22
 
 ### Añadido
