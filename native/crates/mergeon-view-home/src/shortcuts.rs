@@ -15,7 +15,7 @@ use gpui_kit::{
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     px, relative, rems,
 };
-use mergeon_app::AppModel;
+use mergeon_app::{ActionDialogMode, AppModel, RemoteAction};
 use mergeon_model::keyboard_shortcuts::{
     CUSTOMIZABLE_SHORTCUTS, ShortcutAction, ShortcutCategory, ShortcutDefinition, combo_label,
     conflicts_for, effective_combo_for, find_conflicts, is_customized, is_mac_platform,
@@ -104,6 +104,65 @@ fn matches_filter(
         return true;
     }
     false
+}
+
+fn join_action_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second}, and {third}"),
+        _ => names.join(", "),
+    }
+}
+
+/// Nota dinámica sobre cuándo los atajos de Fetch, Pull y Push abren su diálogo
+/// de opciones según el modo configurado en Settings → Git.
+fn direct_actions_note(
+    fetch: ActionDialogMode,
+    pull: ActionDialogMode,
+    push: ActionDialogMode,
+) -> String {
+    let actions = [("Fetch", fetch), ("Pull", pull), ("Push", push)];
+    let mut direct = Vec::with_capacity(3);
+    let mut always = Vec::with_capacity(3);
+    for (name, mode) in actions {
+        if mode == ActionDialogMode::Always {
+            always.push(name);
+        } else {
+            direct.push(name);
+        }
+    }
+    if always.is_empty() {
+        return "Fetch, Pull, and Push shortcuts run immediately using your last confirmed options (falling back to the dialog when no safe target exists).".to_string();
+    }
+    if direct.is_empty() {
+        return "Fetch, Pull, and Push shortcuts open their options dialog first (Settings → Git)."
+            .to_string();
+    }
+    let direct_part = if direct.len() == 1 {
+        format!(
+            "{} shortcut runs immediately using your last confirmed options.",
+            direct[0]
+        )
+    } else {
+        format!(
+            "{} shortcuts run immediately using your last confirmed options.",
+            join_action_names(&direct)
+        )
+    };
+    let always_part = if always.len() == 1 {
+        format!(
+            "{} shortcut opens its options dialog first (Settings → Git).",
+            always[0]
+        )
+    } else {
+        format!(
+            "{} shortcuts open their options dialog first (Settings → Git).",
+            join_action_names(&always)
+        )
+    };
+    format!("{direct_part} {always_part}")
 }
 
 /// Panel de Settings → Shortcuts.
@@ -439,7 +498,14 @@ impl Render for ShortcutsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *cx.palette();
         let is_mac = is_mac_platform();
-        let overrides = self.model.read(cx).keyboard_shortcuts().clone();
+        let model = self.model.read(cx);
+        let overrides = model.keyboard_shortcuts().clone();
+        let direct_note: SharedString = direct_actions_note(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            model.action_dialog_mode(RemoteAction::Pull),
+            model.action_dialog_mode(RemoteAction::Push),
+        )
+        .into();
         let query = self.search.read(cx).value().to_string();
         let conflicts = find_conflicts(&overrides, is_mac);
         let has_overrides = !overrides.is_empty();
@@ -547,12 +613,11 @@ impl Render for ShortcutsPanel {
                         div()
                             .id("shortcuts-direct-actions-note")
                             .test_support()
+                            .aria_label(direct_note.clone())
                             .text_size(rems(0.75))
                             .line_height(relative(1.5))
                             .text_color(palette.muted_foreground)
-                            .child(
-                                "Fetch, Pull, and Push shortcuts run immediately using your last confirmed dialog options (falling back to the dialog when no safe target exists).",
-                            ),
+                            .child(direct_note),
                     ),
             )
             .when_some(conflict_summary, |el, summary| {
@@ -669,6 +734,42 @@ mod tests {
         assert_eq!(
             combo_from_keystroke(&stroke("shift", Modifiers::none()), false),
             None
+        );
+    }
+
+    #[test]
+    fn direct_actions_note_reflects_per_action_dialog_modes() {
+        assert_eq!(
+            direct_actions_note(
+                ActionDialogMode::Toolbar,
+                ActionDialogMode::Never,
+                ActionDialogMode::Toolbar,
+            ),
+            "Fetch, Pull, and Push shortcuts run immediately using your last confirmed options (falling back to the dialog when no safe target exists)."
+        );
+        assert_eq!(
+            direct_actions_note(
+                ActionDialogMode::Always,
+                ActionDialogMode::Always,
+                ActionDialogMode::Always,
+            ),
+            "Fetch, Pull, and Push shortcuts open their options dialog first (Settings → Git)."
+        );
+        assert_eq!(
+            direct_actions_note(
+                ActionDialogMode::Toolbar,
+                ActionDialogMode::Never,
+                ActionDialogMode::Always,
+            ),
+            "Fetch and Pull shortcuts run immediately using your last confirmed options. Push shortcut opens its options dialog first (Settings → Git)."
+        );
+        assert_eq!(
+            direct_actions_note(
+                ActionDialogMode::Never,
+                ActionDialogMode::Always,
+                ActionDialogMode::Always,
+            ),
+            "Fetch shortcut runs immediately using your last confirmed options. Pull and Push shortcuts open their options dialog first (Settings → Git)."
         );
     }
 }

@@ -38,6 +38,7 @@ use crate::palette::{
 };
 use crate::views;
 use crate::workspace::{RepositoryWorkspaceView, insertion_marker};
+use crate::workspace_switcher::{WorkspaceItem, WorkspaceSwitcher, WorkspaceSwitcherEvent};
 use mergeon_model::command_palette::PaletteKind;
 use mergeon_model::workspace_tabs::FileTabDescriptor;
 use mergeon_ui::dialog::{AppDialog, DialogId, DialogWidth};
@@ -338,6 +339,7 @@ fn palette_action_uses_repository(action: &PaletteAction) -> bool {
                         | A::PreviousRepositoryTab
                         | A::SelectRepositoryTab(_)
                         | A::OpenCommandPalette
+                        | A::SwitchWorkspace
                 )
         ),
     }
@@ -485,6 +487,12 @@ struct OpenPalette {
     _subscriptions: Vec<Subscription>,
 }
 
+struct OpenWorkspaceSwitcher {
+    dialog: DialogId,
+    view: Entity<WorkspaceSwitcher>,
+    _subscriptions: Vec<Subscription>,
+}
+
 pub struct AppShell {
     model: Entity<AppModel>,
     shown: ShellState,
@@ -503,6 +511,7 @@ pub struct AppShell {
     /// Archivos de cada repositorio para "Go to file…".
     file_index: Entity<FileIndex>,
     palette: Option<OpenPalette>,
+    workspace_switcher: Option<OpenWorkspaceSwitcher>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -572,6 +581,7 @@ impl AppShell {
             scrolled_tab: None,
             file_index: cx.new(|_| FileIndex::new()),
             palette: None,
+            workspace_switcher: None,
             _subscriptions: subscriptions,
         }
     }
@@ -593,20 +603,46 @@ impl AppShell {
         self.palette.as_ref().map(|open| &open.view)
     }
 
+    /// El selector rápido de workspaces abierto, si lo hay.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn workspace_switcher(&self) -> Option<&Entity<WorkspaceSwitcher>> {
+        self.workspace_switcher.as_ref().map(|open| &open.view)
+    }
+
+    /// Tooltip actual del botón selector de workspaces de la barra de título.
+    pub(crate) fn workspace_switcher_tooltip(&self) -> String {
+        let active_name = self.shown.active_workspace_id.as_deref().and_then(|id| {
+            self.shown
+                .workspaces
+                .iter()
+                .find(|ws| ws.id == id)
+                .map(|ws| ws.name.as_str())
+        });
+        let base = match active_name {
+            Some(name) => format!("Workspace: {name}"),
+            None => "Workspace: All repositories".to_string(),
+        };
+        tooltip_with_shortcut(
+            &base,
+            ShortcutAction::SwitchWorkspace,
+            &self.shown.keyboard_shortcuts,
+            cfg!(target_os = "macos"),
+        )
+    }
+
     /// Lo que lista la paleta: comandos, repositorios y las ramas del
     /// repositorio activo (los archivos llegan aparte).
     fn palette_entries(&self, cx: &gpui_kit::App) -> Vec<PaletteEntry> {
         let model = self.model.read(cx);
         let context = CommandContext::read(model);
-        let skip_action_dialogs = model.skip_action_dialogs();
         let shortcuts = model.keyboard_shortcuts();
         let mut entries: Vec<PaletteEntry> = COMMANDS
             .iter()
-            .filter(|spec| spec.visible(skip_action_dialogs))
+            .filter(|spec| spec.visible(model))
             .map(|spec| PaletteEntry {
                 kind: PaletteKind::Command,
                 icon: spec.icon,
-                label: spec.display_label(skip_action_dialogs).into(),
+                label: spec.display_label(model).into(),
                 context: spec.group.into(),
                 shortcut: spec.shortcut_label_with(shortcuts).map(Into::into),
                 enabled: spec.available(context),
@@ -1081,6 +1117,109 @@ impl AppShell {
     fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(open) = self.palette.take() {
             mergeon_ui::dialog::close_id(window, cx, open.dialog);
+        }
+    }
+
+    /// Ctrl+Alt+W / ⌘⌥W: abre el selector rápido de workspaces (0 = All, 1–9 = workspaces).
+    pub fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = &self.workspace_switcher {
+            if mergeon_ui::dialog::open_count(window, cx) > 0 {
+                let handle = open.view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+                return;
+            }
+            self.workspace_switcher = None;
+        }
+        // Encima de otro diálogo, no.
+        if mergeon_ui::dialog::open_count(window, cx) > 0 {
+            return;
+        }
+
+        let (items, active_workspace_id, total_open) = {
+            let model = self.model.read(cx);
+            let items: Vec<WorkspaceItem> = model
+                .workspaces()
+                .iter()
+                .map(|ws| WorkspaceItem {
+                    id: ws.id.clone(),
+                    name: ws.name.clone(),
+                    repo_count: ws.repositories.len(),
+                })
+                .collect();
+            (
+                items,
+                model.active_workspace_id().map(str::to_string),
+                model.open_repositories().len(),
+            )
+        };
+
+        let view = cx.new(|cx| WorkspaceSwitcher::new(items, active_workspace_id, total_open, cx));
+        let subscriptions = vec![cx.subscribe_in(
+            &view,
+            window,
+            |this: &mut Self, _, event: &WorkspaceSwitcherEvent, window, cx| {
+                if !this.close_workspace_switcher(window, cx) {
+                    return;
+                }
+                match event {
+                    WorkspaceSwitcherEvent::Select(id) => {
+                        let id = id.clone();
+                        this.model.update(cx, |model, cx| {
+                            model.select_workspace(id, cx).detach();
+                        });
+                    }
+                    WorkspaceSwitcherEvent::CreateNew => {
+                        this.model.update(cx, |model, cx| {
+                            let initial = model
+                                .active_repository()
+                                .map(|repo| vec![repo.path.clone()])
+                                .unwrap_or_default();
+                            model.prompt_create_workspace(initial, cx).detach();
+                        });
+                    }
+                }
+            },
+        )];
+
+        let shell = cx.entity().downgrade();
+        let dialog = AppDialog::new()
+            .top_anchored()
+            .width(DialogWidth::Sm)
+            .flush_body()
+            .close_button(false)
+            .body({
+                let view = view.clone();
+                move |_, _| view.clone()
+            })
+            .on_confirm({
+                let view = view.clone();
+                move |_, cx| {
+                    view.update(cx, |view, cx| view.confirm(cx));
+                    true
+                }
+            })
+            .on_close(move |_, cx| {
+                shell
+                    .update(cx, |shell, _| shell.workspace_switcher = None)
+                    .ok();
+            })
+            .open(window, cx);
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        self.workspace_switcher = Some(OpenWorkspaceSwitcher {
+            dialog,
+            view,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    fn close_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(open) = self.workspace_switcher.take() {
+            mergeon_ui::dialog::close_id(window, cx, open.dialog);
+            true
+        } else {
+            false
         }
     }
 
@@ -1652,16 +1791,12 @@ impl AppShell {
         }
         let workspaces = self.shown.workspaces.clone();
         let active_workspace_id = self.shown.active_workspace_id.clone();
-        let total_open = self.shown.open_repo_ids.len();
         let active_label = active_workspace_id
             .as_deref()
             .and_then(|id| workspaces.iter().find(|ws| ws.id == id))
             .map(|ws| ws.name.clone())
             .unwrap_or_else(|| "All".to_string());
-        let tooltip = match active_workspace_id.as_deref() {
-            Some(_) => format!("Workspace: {active_label}"),
-            None => "Workspace: All repositories".to_string(),
-        };
+        let tooltip = self.workspace_switcher_tooltip();
         let model = self.model.clone();
 
         Some(
@@ -1682,7 +1817,7 @@ impl AppShell {
                             items.push(
                                 MenuItem::new("All")
                                     .icon(Lucide::Folders)
-                                    .detail(total_open.to_string())
+                                    .shortcut("0")
                                     .checked(active_workspace_id.is_none())
                                     .on_click(move |_, cx| {
                                         all_model.update(cx, |model, cx| {
@@ -1690,24 +1825,27 @@ impl AppShell {
                                         });
                                     }),
                             );
-                            for workspace in &workspaces {
+                            for (index, workspace) in workspaces.iter().enumerate() {
                                 let ws_model = model.clone();
                                 let ws_id = workspace.id.clone();
                                 let is_active =
                                     active_workspace_id.as_deref() == Some(workspace.id.as_str());
-                                items.push(
-                                    MenuItem::new(workspace.name.clone())
-                                        .icon(Lucide::Folder)
-                                        .detail(workspace.repo_count.to_string())
-                                        .checked(is_active)
-                                        .on_click(move |_, cx| {
-                                            ws_model.update(cx, |model, cx| {
-                                                model
-                                                    .select_workspace(Some(ws_id.clone()), cx)
-                                                    .detach();
-                                            });
-                                        }),
-                                );
+                                let mut item = MenuItem::new(workspace.name.clone())
+                                    .icon(Lucide::Folder)
+                                    .checked(is_active)
+                                    .on_click(move |_, cx| {
+                                        ws_model.update(cx, |model, cx| {
+                                            model
+                                                .select_workspace(Some(ws_id.clone()), cx)
+                                                .detach();
+                                        });
+                                    });
+                                if index < 9 {
+                                    item = item.shortcut((index + 1).to_string());
+                                } else {
+                                    item = item.detail(workspace.repo_count.to_string());
+                                }
+                                items.push(item);
                             }
                             items.push(MenuItem::separator());
                             let create_model = model.clone();

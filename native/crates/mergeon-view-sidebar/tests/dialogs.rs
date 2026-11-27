@@ -8,14 +8,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui_kit::test::TestWindowExt as _;
-use gpui_kit::{Entity, TestAppContext};
+use gpui_kit::{App, Entity, TestAppContext, Window};
 use mergeon_app::LocalChangesMode;
 use mergeon_backend::{BranchComparison, ComparedCommit};
-use mergeon_view_sidebar::SidebarCommand;
 use mergeon_view_sidebar::dialogs::{
     CheckoutBranchDialog, CheckoutBranchDialogEvent, CheckoutBranchOptions, CheckoutTargetOption,
     open_branch_comparison_dialog, open_checkout_branch_dialog,
 };
+use mergeon_view_sidebar::{BranchAction, SidebarCommand};
 
 use support::{Harness, TestRepo};
 
@@ -142,6 +142,83 @@ async fn dismissing_the_dialog_reports_a_close(cx: &mut TestAppContext) {
 
     assert_eq!(*events.borrow(), [CheckoutBranchDialogEvent::Close]);
     assert!(h.dialog_titles(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn enter_submits_checkout_branch_dialog(cx: &mut TestAppContext) {
+    let h = Harness::mount(None, cx);
+    let (_dialog, events) = open_checkout(&h, CheckoutBranchOptions::new("feature"), cx);
+
+    h.in_window(cx, |window, cx| window.press("enter", cx));
+
+    assert_eq!(
+        *events.borrow(),
+        [CheckoutBranchDialogEvent::Submit {
+            local_changes_mode: LocalChangesMode::Keep,
+            target: None,
+        }]
+    );
+    assert!(h.dialog_titles(cx).is_empty());
+}
+
+fn focus_by_tab(window: &mut Window, cx: &mut App, id: &'static str) {
+    window.render_frame(cx);
+    for _ in 0..32 {
+        if window.find(id).focused() == Some(true) {
+            return;
+        }
+        window.focus_next(cx);
+        window.render_frame(cx);
+    }
+    panic!("Tab never reached `{id}`");
+}
+
+#[gpui_kit::test]
+async fn branch_action_cards_activate_with_enter_and_space(cx: &mut TestAppContext) {
+    let repo = TestRepo::with_feature();
+    let h = Harness::open(&repo, cx).await;
+
+    h.in_window(cx, |window, cx| {
+        h.sidebar.update(cx, |sidebar, cx| {
+            sidebar.run_command(
+                SidebarCommand::BranchAction {
+                    branch: "feature".to_string(),
+                    action: BranchAction::Compare,
+                },
+                window,
+                cx,
+            );
+        });
+    });
+    assert_eq!(h.dialog_titles(cx), ["Branch Actions: feature → main"]);
+
+    // Tab hasta la tarjeta Compare y activar con Enter.
+    h.in_window(cx, |window, cx| {
+        focus_by_tab(window, cx, "branch-action-compare");
+        window.press("enter", cx);
+    });
+    h.wait_ui(cx, "the comparison dialog via Enter", |window, cx| {
+        mergeon_ui::dialog::open_count(window, cx) == 2
+    });
+    assert_eq!(
+        h.dialog_titles(cx),
+        ["Branch Actions: feature → main", "Branch Comparison"]
+    );
+    h.click(cx, "branch-comparison-close");
+    assert_eq!(h.dialog_titles(cx), ["Branch Actions: feature → main"]);
+
+    // Tab hasta la tarjeta Compare y activar con Space.
+    h.in_window(cx, |window, cx| {
+        focus_by_tab(window, cx, "branch-action-compare");
+        window.press("space", cx);
+    });
+    h.wait_ui(cx, "the comparison dialog via Space", |window, cx| {
+        mergeon_ui::dialog::open_count(window, cx) == 2
+    });
+    assert_eq!(
+        h.dialog_titles(cx),
+        ["Branch Actions: feature → main", "Branch Comparison"]
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -2288,6 +2288,39 @@ async fn ctrl_f_in_the_diff_counts_and_walks_the_matches(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+async fn closing_find_during_a_background_search_clears_the_cache_for_reopen(
+    cx: &mut TestAppContext,
+) {
+    // Más de `SYNC_SEARCH_ROWS` (20_000) para que la búsqueda corra en segundo plano.
+    let diff = large_diff(20_005);
+    let (window, viewer) = open_diff(cx, &diff, "big.js", DiffViewMode::Unified, None);
+    cx.run_until_parked();
+    draw(cx, window);
+
+    focus_and_find(cx, window);
+    // Cancelar la búsqueda antes de que termine en segundo plano.
+    in_window(cx, window, |window, cx| {
+        window.input("value19999", cx);
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+    let closed = find_status(cx, &viewer);
+    assert!(!closed.open);
+    assert!(!closed.searching);
+    assert!(closed.matches.is_empty());
+
+    // Reabrir con la misma consulta debe relanzar la búsqueda y devolver la coincidencia.
+    in_window(cx, window, |window, cx| window.press("secondary-f", cx));
+    cx.run_until_parked();
+    draw(cx, window);
+    let reopened = find_status(cx, &viewer);
+    assert!(reopened.open);
+    assert!(!reopened.searching);
+    assert_eq!(reopened.query, "value19999");
+    assert_eq!(reopened.matches.len(), 1);
+}
+
+#[gpui_kit::test]
 async fn the_current_match_is_scrolled_into_view(cx: &mut TestAppContext) {
     // 3 bloques con 300 líneas de contexto delante de cada uno: el tercero
     // queda muy por debajo de la ventana.

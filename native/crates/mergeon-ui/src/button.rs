@@ -29,7 +29,7 @@ use crate::theme::{ActivePaletteExt as _, with_alpha};
 /// Contexto de teclado de los botones de Mergeon. Suprime el `Enter → Confirm`
 /// de un diálogo padre para que Enter active el botón enfocado en vez de
 /// disparar la acción por defecto del diálogo.
-pub(crate) const BUTTON_KEY_CONTEXT: &str = "MergeonButton";
+pub const BUTTON_KEY_CONTEXT: &str = "MergeonButton";
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("enter", NoAction, Some(BUTTON_KEY_CONTEXT))]);

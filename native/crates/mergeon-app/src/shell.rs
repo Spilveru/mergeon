@@ -22,7 +22,7 @@ use mergeon_model::keyboard_shortcuts::ShortcutAction;
 use mergeon_model::notify::{NotifyOptions, NotifyType, ToastAction, ToastId};
 use mergeon_model::operations_log::ResultContext;
 use mergeon_model::repositories::{MutationQueue, normalize_repository_path};
-use mergeon_model::repository_read_model::BranchItem;
+use mergeon_model::repository_read_model::{BranchItem, split_remote_ref};
 use mergeon_model::workspace_tabs::WorkspaceSection;
 
 use crate::convert::{StructuredOutcome, operation_event, queue_snapshot};
@@ -30,7 +30,7 @@ use crate::flows::{CreateBranchRequest, FlowStatus, LocalChangesMode};
 use crate::repositories::AddRepository;
 use crate::repository_sync::SyncRequest;
 use crate::tasks::{InFlightMap, flow, settled};
-use crate::{AppEvent, AppModel, OpenRepository};
+use crate::{ActionDialogMode, AppEvent, AppModel, OpenRepository, RemoteAction};
 
 /// Clave del botón "Choose editor…" de los avisos de "Open in editor": abre
 /// Ajustes → Git (donde está "External editor").
@@ -465,7 +465,12 @@ impl AppModel {
             .active_branch_entry()
             .and_then(|branch| branch.upstream.as_deref())
             .unwrap_or_default();
-        if let Some((remote, _)) = upstream.split_once('/') {
+        let remote_names = self
+            .repositories
+            .active_repository_remotes()
+            .iter()
+            .map(|remote| remote.name.as_str());
+        if let Some((remote, _)) = split_remote_ref(upstream, remote_names) {
             return remote.to_string();
         }
 
@@ -484,7 +489,12 @@ impl AppModel {
             .active_branch_entry()
             .and_then(|branch| branch.upstream.as_deref())
             .unwrap_or_default();
-        match upstream.split_once('/') {
+        let remote_names = self
+            .repositories
+            .active_repository_remotes()
+            .iter()
+            .map(|remote| remote.name.as_str());
+        match split_remote_ref(upstream, remote_names) {
             Some((_, branch)) => branch.to_string(),
             None => self.active_repo_current_branch().to_string(),
         }
@@ -652,9 +662,9 @@ impl AppModel {
             ShortcutAction::SelectRepositoryTab(number) => {
                 self.select_repository_tab_number(number, cx);
             }
-            // La paleta es un diálogo de la cáscara (`crates/mergeon`), que
-            // atiende el atajo antes de llegar aquí.
-            ShortcutAction::OpenCommandPalette => {}
+            // La paleta y el selector de workspaces son diálogos de la cáscara
+            // (`crates/mergeon`), que atiende el atajo antes de llegar aquí.
+            ShortcutAction::OpenCommandPalette | ShortcutAction::SwitchWorkspace => {}
             ShortcutAction::Undo => self.undo(cx).detach(),
             ShortcutAction::Redo => self.redo(cx).detach(),
         }
@@ -662,13 +672,31 @@ impl AppModel {
 
     /// Igual que [`Self::handle_shortcut`], pero para pulsaciones directas de
     /// teclado: Fetch, Pull y Push corren inmediatamente con las opciones
-    /// recordadas (cayendo al diálogo solo cuando no hay destino seguro), sin
-    /// depender de `skip_action_dialogs`.
+    /// recordadas (cayendo al diálogo solo cuando no hay destino seguro), salvo
+    /// que el modo por acción sea [`ActionDialogMode::Always`].
     pub fn handle_keyboard_shortcut(&mut self, action: ShortcutAction, cx: &mut Context<Self>) {
         match action {
-            ShortcutAction::Fetch => self.handle_fetch_direct(cx),
-            ShortcutAction::Pull => self.handle_pull_direct(cx),
-            ShortcutAction::Push => self.handle_push_direct(cx),
+            ShortcutAction::Fetch => {
+                if self.action_dialog_mode(RemoteAction::Fetch) == ActionDialogMode::Always {
+                    self.open_fetch_dialog(cx);
+                } else {
+                    self.handle_fetch_direct(cx);
+                }
+            }
+            ShortcutAction::Pull => {
+                if self.action_dialog_mode(RemoteAction::Pull) == ActionDialogMode::Always {
+                    self.open_pull_dialog(cx);
+                } else {
+                    self.handle_pull_direct(cx);
+                }
+            }
+            ShortcutAction::Push => {
+                if self.action_dialog_mode(RemoteAction::Push) == ActionDialogMode::Always {
+                    self.open_push_dialog(cx);
+                } else {
+                    self.handle_push_direct(cx);
+                }
+            }
             other => self.handle_shortcut(other, cx),
         }
     }
@@ -1752,15 +1780,14 @@ impl AppModel {
             return None;
         }
         let remote = self.default_remote_name();
-        let remote_entry = self
-            .repositories
-            .active_repository_remotes()
-            .iter()
-            .find(|entry| entry.name == remote)?;
+        let remotes = self.repositories.active_repository_remotes();
+        let remote_entry = remotes.iter().find(|entry| entry.name == remote)?;
         let upstream_branch = self
             .active_branch_entry()
             .and_then(|entry| entry.upstream.as_deref())
-            .and_then(|upstream| upstream.split_once('/'))
+            .and_then(|upstream| {
+                split_remote_ref(upstream, remotes.iter().map(|entry| entry.name.as_str()))
+            })
             .filter(|(up_remote, up_branch)| *up_remote == remote && !up_branch.is_empty())
             .map(|(_, up_branch)| up_branch.to_string());
         let branch = upstream_branch.or_else(|| {
@@ -1840,30 +1867,33 @@ impl AppModel {
         self.open_push_dialog(cx);
     }
 
-    /// `handleFetch`: ejecuta fetch directamente si `skip_action_dialogs` está
-    /// activo y existe al menos un remoto; si no, abre el diálogo de fetch.
+    /// `handleFetch`: ejecuta fetch directamente si su modo de diálogo es
+    /// [`ActionDialogMode::Never`] y existe al menos un remoto; si no, abre el
+    /// diálogo de fetch.
     pub fn handle_fetch(&mut self, cx: &mut Context<Self>) {
-        if self.settings.skip_action_dialogs {
+        if self.action_dialog_mode(RemoteAction::Fetch) == ActionDialogMode::Never {
             self.handle_fetch_direct(cx);
         } else {
             self.open_fetch_dialog(cx);
         }
     }
 
-    /// `handlePull`: ejecuta pull directamente si `skip_action_dialogs` está
-    /// activo y hay un destino seguro; si no, abre el diálogo de pull.
+    /// `handlePull`: ejecuta pull directamente si su modo de diálogo es
+    /// [`ActionDialogMode::Never`] y hay un destino seguro; si no, abre el
+    /// diálogo de pull.
     pub fn handle_pull(&mut self, cx: &mut Context<Self>) {
-        if self.settings.skip_action_dialogs {
+        if self.action_dialog_mode(RemoteAction::Pull) == ActionDialogMode::Never {
             self.handle_pull_direct(cx);
         } else {
             self.open_pull_dialog(cx);
         }
     }
 
-    /// `handlePush`: ejecuta push directamente si `skip_action_dialogs` está
-    /// activo y la rama actual tiene upstream; si no, abre el diálogo de push.
+    /// `handlePush`: ejecuta push directamente si su modo de diálogo es
+    /// [`ActionDialogMode::Never`] y la rama actual tiene upstream; si no, abre
+    /// el diálogo de push.
     pub fn handle_push(&mut self, cx: &mut Context<Self>) {
-        if self.settings.skip_action_dialogs {
+        if self.action_dialog_mode(RemoteAction::Push) == ActionDialogMode::Never {
             self.handle_push_direct(cx);
         } else {
             self.open_push_dialog(cx);
@@ -2076,12 +2106,22 @@ impl AppModel {
         let repo_id = repository.id.clone();
         let repo_path = repository.path.clone();
 
-        let (remote, target_branch) = match request.destination.split_once('/') {
-            Some((remote, branch)) if !branch.is_empty() => {
-                (remote.to_string(), branch.to_string())
+        let remote_names: Vec<&str> = self
+            .repositories
+            .active_repository_remotes()
+            .iter()
+            .map(|remote| remote.name.as_str())
+            .collect();
+        let (remote, target_branch) = if remote_names.contains(&request.destination.as_str()) {
+            (request.destination.clone(), request.branch.clone())
+        } else {
+            match split_remote_ref(&request.destination, remote_names.iter().copied()) {
+                Some((remote, branch)) if !branch.is_empty() => {
+                    (remote.to_string(), branch.to_string())
+                }
+                Some((remote, _)) => (remote.to_string(), request.branch.clone()),
+                None => (request.destination.clone(), request.branch.clone()),
             }
-            Some((remote, _)) => (remote.to_string(), request.branch.clone()),
-            None => (request.destination.clone(), request.branch.clone()),
         };
 
         self.run_repo_operation_single_flight(&repo_id.clone(), "push", cx, move |_, cx| {

@@ -7,8 +7,8 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use gpui_kit::TestAppContext;
 use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{Focusable as _, TestAppContext};
 use mergeon_view_sidebar::SidebarCommand;
 use mergeon_view_sidebar::dialogs::NewWorktreeMode;
 
@@ -482,4 +482,49 @@ async fn a_mutation_rereads_only_this_worktree_state(cx: &mut TestAppContext) {
     h.wait_app(cx, "every state again", |cx| {
         h.sidebar.read(cx).worktree_status_reads() >= after + 3
     });
+}
+
+#[gpui_kit::test]
+async fn existing_branch_mode_focuses_the_folder_input_on_open(cx: &mut TestAppContext) {
+    let repo = TestRepo::with_feature();
+    let h = open(&repo, cx).await;
+
+    let entries = h
+        .sidebar
+        .read_with(cx, |sidebar, cx| sidebar.local_branch_menu("feature", cx));
+    h.choose_menu_entry(
+        cx,
+        "branch:feature",
+        &entries,
+        "Check out in new worktree...",
+    );
+    let dialog = h
+        .sidebar
+        .read_with(cx, |sidebar, _| sidebar.new_worktree_dialog().cloned())
+        .expect("the dialog is open");
+    assert_eq!(
+        dialog.read_with(cx, |dialog, _| dialog.mode()),
+        NewWorktreeMode::ExistingBranch
+    );
+
+    let (folder_focused, branch_focused) = h.in_window(cx, |window, cx| {
+        let state = dialog.read(cx);
+        (
+            state
+                .folder_input()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window),
+            state
+                .branch_input()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window),
+        )
+    });
+    assert!(folder_focused, "folder input should be focused");
+    assert!(
+        !branch_focused,
+        "unrendered branch input should not be focused"
+    );
 }

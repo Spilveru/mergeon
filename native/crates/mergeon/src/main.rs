@@ -12,6 +12,7 @@ mod test_mode;
 mod ui_host;
 mod views;
 mod workspace;
+mod workspace_switcher;
 
 use std::rc::Rc;
 use std::sync::Arc;

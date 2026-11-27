@@ -18,7 +18,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div,
     px,
 };
-use mergeon_app::AppModel;
+use mergeon_app::{ActionDialogMode, AppModel, RemoteAction};
 use mergeon_gitcmd::{ConflictState, OperationState};
 use mergeon_model::keyboard_shortcuts::{
     ShortcutAction, combo_label_parts, effective_combo_for, effective_combo_label, is_customized,
@@ -171,7 +171,7 @@ impl ToolbarAction {
     fn tooltip(
         self,
         shortcuts: &BTreeMap<String, String>,
-        skip_action_dialogs: bool,
+        dialog_mode: Option<ActionDialogMode>,
         push_tags: bool,
         is_mac: bool,
     ) -> String {
@@ -185,7 +185,9 @@ impl ToolbarAction {
         if self == Self::Push && push_tags {
             text.push_str(" · +tags");
         }
-        if skip_action_dialogs && matches!(self, Self::Fetch | Self::Pull | Self::Push) {
+        if dialog_mode == Some(ActionDialogMode::Never)
+            && matches!(self, Self::Fetch | Self::Pull | Self::Push)
+        {
             text.push_str(" · Shift+click or right-click for options");
         }
         text
@@ -239,8 +241,10 @@ struct ToolbarState {
     redo_label: Option<String>,
     /// Hay un deshacer o rehacer en curso.
     undo_running: bool,
-    /// Si Fetch / Pull / Push ejecutan directamente sin diálogo.
-    skip_action_dialogs: bool,
+    /// Modo de diálogo de opciones por acción (`Fetch`, `Pull`, `Push`).
+    fetch_dialog_mode: ActionDialogMode,
+    pull_dialog_mode: ActionDialogMode,
+    push_dialog_mode: ActionDialogMode,
     /// Si Push recuerda enviar tags (`action_defaults.push.push_tags`).
     push_tags: bool,
     /// Atajos personalizados para los tooltips y el buscador.
@@ -248,6 +252,15 @@ struct ToolbarState {
 }
 
 impl ToolbarState {
+    fn dialog_mode(&self, action: ToolbarAction) -> Option<ActionDialogMode> {
+        match action {
+            ToolbarAction::Fetch => Some(self.fetch_dialog_mode),
+            ToolbarAction::Pull => Some(self.pull_dialog_mode),
+            ToolbarAction::Push => Some(self.push_dialog_mode),
+            _ => None,
+        }
+    }
+
     fn read(model: &AppModel) -> Option<Self> {
         let repository = model.active_repository()?;
         // Lo que la rama actual lleva de ventaja y de retraso sobre su upstream.
@@ -267,7 +280,9 @@ impl ToolbarState {
             undo_label: model.undo_action_label(&repository.path, false),
             redo_label: model.undo_action_label(&repository.path, true),
             undo_running: model.is_undo_running(&repository.path),
-            skip_action_dialogs: model.skip_action_dialogs(),
+            fetch_dialog_mode: model.action_dialog_mode(RemoteAction::Fetch),
+            pull_dialog_mode: model.action_dialog_mode(RemoteAction::Pull),
+            push_dialog_mode: model.action_dialog_mode(RemoteAction::Push),
             push_tags: model.action_defaults().push.push_tags,
             keyboard_shortcuts: model.keyboard_shortcuts().clone(),
         })
@@ -315,7 +330,7 @@ impl ToolbarView {
         };
         Some(action.tooltip(
             &state.keyboard_shortcuts,
-            state.skip_action_dialogs,
+            state.dialog_mode(action),
             state.push_tags,
             cfg!(target_os = "macos"),
         ))
@@ -447,7 +462,7 @@ impl ToolbarView {
         } else {
             plain_icon(action.icon(), 16.)
         };
-        let tooltip = action.tooltip(shortcuts, false, false, cfg!(target_os = "macos"));
+        let tooltip = action.tooltip(shortcuts, None, false, cfg!(target_os = "macos"));
         mergeon_ui::button(action.id())
             .ghost()
             .sm()
@@ -800,7 +815,9 @@ impl Render for ToolbarView {
             undo_label,
             redo_label,
             undo_running,
-            skip_action_dialogs,
+            fetch_dialog_mode,
+            pull_dialog_mode,
+            push_dialog_mode,
             push_tags,
             keyboard_shortcuts,
         }) = state
@@ -818,15 +835,17 @@ impl Render for ToolbarView {
         // Fetch | Pull | Push: un solo control segmentado. Pull lleva lo que
         // hay por traer y Push lo que hay por enviar.
         let sync_actions = [
-            (ToolbarAction::Fetch, None),
+            (ToolbarAction::Fetch, fetch_dialog_mode, None),
             (
                 ToolbarAction::Pull,
+                pull_dialog_mode,
                 Some(behind)
                     .filter(|count| *count > 0)
                     .map(|count| count_badge("toolbar-pull-count", count, CountTone::Neutral, cx)),
             ),
             (
                 ToolbarAction::Push,
+                push_dialog_mode,
                 Some(ahead)
                     .filter(|count| *count > 0)
                     .map(|count| count_badge("toolbar-push-count", count, CountTone::Accent, cx)),
@@ -834,14 +853,14 @@ impl Render for ToolbarView {
         ];
         let last_sync = sync_actions.len() - 1;
         let mut sync_group = segmented_group(cx);
-        for (index, (action, badge)) in sync_actions.into_iter().enumerate() {
+        for (index, (action, dialog_mode, badge)) in sync_actions.into_iter().enumerate() {
             if index > 0 {
                 sync_group = sync_group.child(segment_divider(palette.border_hair));
             }
             let busy = busy_operation == action.operation();
             let tooltip = action.tooltip(
                 &keyboard_shortcuts,
-                skip_action_dialogs,
+                Some(dialog_mode),
                 push_tags,
                 cfg!(target_os = "macos"),
             );
@@ -858,7 +877,7 @@ impl Render for ToolbarView {
         let stash_busy = busy_operation == ToolbarAction::Stash.operation();
         let stash_tooltip = ToolbarAction::Stash.tooltip(
             &keyboard_shortcuts,
-            skip_action_dialogs,
+            None,
             false,
             cfg!(target_os = "macos"),
         );
@@ -1171,13 +1190,16 @@ mod tests {
             ToolbarAction::Pull,
             ToolbarAction::Push,
         ] {
-            let dialog_mode = action.tooltip(&shortcuts, false, false, false);
-            assert!(
-                !dialog_mode.contains("Shift+click or right-click for options"),
-                "{dialog_mode}"
-            );
+            for mode in [ActionDialogMode::Toolbar, ActionDialogMode::Always] {
+                let tip = action.tooltip(&shortcuts, Some(mode), false, false);
+                assert!(
+                    !tip.contains("Shift+click or right-click for options"),
+                    "{mode:?}: {tip}"
+                );
+            }
 
-            let direct_mode = action.tooltip(&shortcuts, true, false, false);
+            let direct_mode =
+                action.tooltip(&shortcuts, Some(ActionDialogMode::Never), false, false);
             assert!(
                 direct_mode.ends_with(" · Shift+click or right-click for options"),
                 "{direct_mode}"
@@ -1186,18 +1208,20 @@ mod tests {
 
         assert!(
             !ToolbarAction::Stash
-                .tooltip(&shortcuts, true, false, false)
+                .tooltip(&shortcuts, Some(ActionDialogMode::Never), false, false)
                 .contains("Shift+click")
         );
 
-        let push_with_tags = ToolbarAction::Push.tooltip(&shortcuts, true, true, false);
+        let push_with_tags =
+            ToolbarAction::Push.tooltip(&shortcuts, Some(ActionDialogMode::Never), true, false);
         assert!(push_with_tags.contains(" · +tags"), "{push_with_tags}");
         assert!(
             push_with_tags.ends_with(" · Shift+click or right-click for options"),
             "{push_with_tags}"
         );
 
-        let fetch_with_push_tags = ToolbarAction::Fetch.tooltip(&shortcuts, true, true, false);
+        let fetch_with_push_tags =
+            ToolbarAction::Fetch.tooltip(&shortcuts, Some(ActionDialogMode::Never), true, false);
         assert!(
             !fetch_with_push_tags.contains("+tags"),
             "{fetch_with_push_tags}"

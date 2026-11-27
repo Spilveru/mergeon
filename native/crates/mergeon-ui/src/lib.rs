@@ -40,7 +40,7 @@ pub use assets::Assets;
 pub use badge::{
     Badge, BadgeSize, BadgeVariant, badge, status_badge, status_badge_style, status_label,
 };
-pub use button::{Button, ButtonSize, ButtonVariant, button};
+pub use button::{BUTTON_KEY_CONTEXT, Button, ButtonSize, ButtonVariant, button};
 pub use checkbox::{Checkbox, checkbox};
 pub use empty_state::{EmptyState, empty_state};
 /// Catálogo completo de íconos Lucide (los mismos que usa la app Electron):

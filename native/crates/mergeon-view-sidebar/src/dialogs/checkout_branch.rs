@@ -238,7 +238,10 @@ impl CheckoutBranchDialog {
 
     /// `handleSubmit`: cierra y avisa de lo elegido.
     pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_dialog(window, cx);
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
+        dialog::close_id(window, cx, id);
         cx.emit(CheckoutBranchDialogEvent::Submit {
             local_changes_mode: self.local_changes_mode,
             target: self.active_option().map(|option| option.value.clone()),
@@ -410,6 +413,13 @@ pub fn open_checkout_branch_dialog(
                                 }
                             }),
                     )
+            }
+        })
+        .on_confirm({
+            let view = view.clone();
+            move |window, cx| {
+                view.update(cx, |view, cx| view.submit(window, cx));
+                false
             }
         })
         .on_close({

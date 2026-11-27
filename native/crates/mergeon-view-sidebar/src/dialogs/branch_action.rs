@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -800,8 +801,10 @@ impl BranchActionDialog {
             ]
         };
 
-        div()
-            .id(id)
+        BaseButton::new(id)
+            .key_context(mergeon_ui::BUTTON_KEY_CONTEXT)
+            .accessibility_label(title)
+            .disabled(busy)
             .relative()
             .flex()
             .flex_col()
@@ -905,7 +908,6 @@ impl BranchActionDialog {
                         ),
                 )
             })
-            .test_support()
     }
 
     fn render_merge_options(&self, cx: &mut Context<Self>) -> impl IntoElement {

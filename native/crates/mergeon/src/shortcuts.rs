@@ -50,6 +50,7 @@ actions!(
         SelectRepositoryTab8,
         SelectRepositoryTab9,
         OpenCommandPalette,
+        SwitchWorkspace,
         UndoGitOperation,
         RedoGitOperation,
     ]
@@ -129,17 +130,24 @@ fn run_now(action: ShortcutAction, cx: &mut App) {
             return;
         }
     }
-    // La paleta es de la cáscara, no del modelo.
-    if action == ShortcutAction::OpenCommandPalette {
+    // La paleta y el selector de workspaces son de la cáscara, no del modelo.
+    if matches!(
+        action,
+        ShortcutAction::OpenCommandPalette | ShortcutAction::SwitchWorkspace
+    ) {
         let shell = cx
             .try_global::<crate::shell::ShellHandle>()
             .and_then(|handle| handle.0.upgrade());
         if let Some(shell) = shell {
             let opened = window.update(cx, |_, window, cx| {
-                shell.update(cx, |shell, cx| shell.open_command_palette(window, cx));
+                shell.update(cx, |shell, cx| match action {
+                    ShortcutAction::OpenCommandPalette => shell.open_command_palette(window, cx),
+                    ShortcutAction::SwitchWorkspace => shell.open_workspace_switcher(window, cx),
+                    _ => {}
+                });
             });
             if let Err(error) = opened {
-                log::warn!("paleta de comandos: {error}");
+                log::warn!("diálogo de la cáscara ({action:?}): {error}");
             }
         }
         return;
@@ -188,6 +196,7 @@ macro_rules! for_all_shortcuts {
             SelectRepositoryTab8 => ShortcutAction::SelectRepositoryTab(8),
             SelectRepositoryTab9 => ShortcutAction::SelectRepositoryTab(9),
             OpenCommandPalette => ShortcutAction::OpenCommandPalette,
+            SwitchWorkspace => ShortcutAction::SwitchWorkspace,
             UndoGitOperation => ShortcutAction::Undo,
             RedoGitOperation => ShortcutAction::Redo,
         )

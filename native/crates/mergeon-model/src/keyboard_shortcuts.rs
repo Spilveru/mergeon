@@ -254,6 +254,8 @@ pub enum ShortcutAction {
     SelectRepositoryTab(u8),
     /// La paleta de comandos (comandos, ramas, repositorios y archivos).
     OpenCommandPalette,
+    /// Selector rápido de workspaces (0 = All, 1–9 = workspaces).
+    SwitchWorkspace,
     /// Deshace la última operación de git del repositorio activo. Con el
     /// foco en un campo de texto el atajo es del campo.
     Undo,
@@ -354,6 +356,12 @@ pub const CUSTOMIZABLE_SHORTCUTS: &[ShortcutDefinition] = &[
         action: ShortcutAction::OpenCommandPalette,
         id: "openCommandPalette",
         label: "Command palette",
+        category: ShortcutCategory::Navigation,
+    },
+    ShortcutDefinition {
+        action: ShortcutAction::SwitchWorkspace,
+        id: "switch-workspace",
+        label: "Switch workspace",
         category: ShortcutCategory::Navigation,
     },
     ShortcutDefinition {
@@ -509,6 +517,7 @@ impl ShortcutAction {
             Self::SelectRepositoryTab(9) => "selectRepositoryTab9",
             Self::SelectRepositoryTab(_) => "",
             Self::OpenCommandPalette => "openCommandPalette",
+            Self::SwitchWorkspace => "switch-workspace",
             Self::Undo => "undo",
             Self::Redo => "redo",
         }
@@ -553,6 +562,7 @@ impl ShortcutAction {
             "selectRepositoryTab8" => Some(Self::SelectRepositoryTab(8)),
             "selectRepositoryTab9" => Some(Self::SelectRepositoryTab(9)),
             "openCommandPalette" => Some(Self::OpenCommandPalette),
+            "switch-workspace" => Some(Self::SwitchWorkspace),
             "undo" => Some(Self::Undo),
             "redo" => Some(Self::Redo),
             _ => None,
@@ -590,6 +600,7 @@ impl ShortcutAction {
             Self::PreviousDocumentTab => "Previous document",
             Self::SelectRepositoryTab(_) => "Repository tab",
             Self::OpenCommandPalette => "Command palette",
+            Self::SwitchWorkspace => "Switch workspace",
             Self::Undo => "Undo last Git operation",
             Self::Redo => "Redo Git operation",
         }
@@ -996,6 +1007,7 @@ pub const APP_SHORTCUTS: &[ShortcutBinding] = &[
     ShortcutBinding::new("mod+shift+w", ShortcutAction::CloseRepository).in_editable(),
     ShortcutBinding::new("mod+shift+t", ShortcutAction::ReopenClosedRepository),
     ShortcutBinding::new("mod+shift+p", ShortcutAction::OpenCommandPalette).in_editable(),
+    ShortcutBinding::new("mod+alt+w", ShortcutAction::SwitchWorkspace).in_editable(),
     // Sin `in_editable`: en un campo de texto, deshacer es del campo (los
     // atajos globales se registran antes que `mergeon_ui::init` para que el
     // `Input` gane en sus propias teclas, y `run_now` además comprueba el foco).
@@ -1098,6 +1110,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
         title: "Navigation",
         items: &[
             item("Command palette", "mod+shift+p"),
+            item("Switch workspace", "mod+alt+w"),
             item("Commits view", "alt+1"),
             item("Changes view", "alt+2"),
             item("Search commits", "mod+f"),
@@ -1315,7 +1328,7 @@ mod tests {
             combos.len(),
             APP_SHORTCUTS.len() + WORKSPACE_SHORTCUTS.len()
         );
-        assert_eq!(APP_SHORTCUTS.len(), 39);
+        assert_eq!(APP_SHORTCUTS.len(), 40);
 
         // Todo lo que anuncia la chuleta existe, salvo lo que atiende cada vista
         // por su cuenta (flechas del historial y confirmar el commit).
@@ -1356,7 +1369,7 @@ mod tests {
                 .iter()
                 .map(|section| section.items.len())
                 .sum::<usize>(),
-            38
+            39
         );
     }
 
@@ -1693,5 +1706,65 @@ mod tests {
             Some("mod+shift+down")
         );
         assert_eq!(cleaned.get("push").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn switch_workspace_has_default_binding_customizes_and_has_no_conflicts() {
+        let defaults = BTreeMap::new();
+        assert_eq!(
+            default_combo_for(ShortcutAction::SwitchWorkspace),
+            Some("mod+alt+w")
+        );
+        assert_eq!(ShortcutAction::SwitchWorkspace.id(), "switch-workspace");
+        assert_eq!(
+            ShortcutAction::from_id("switch-workspace"),
+            Some(ShortcutAction::SwitchWorkspace)
+        );
+        assert_eq!(ShortcutAction::SwitchWorkspace.label(), "Switch workspace");
+        assert_eq!(
+            ShortcutAction::SwitchWorkspace.category(),
+            ShortcutCategory::Navigation
+        );
+
+        // Zero conflicts with existing defaults on both macOS and non-macOS.
+        assert!(find_conflicts(&defaults, false).is_empty());
+        assert!(find_conflicts(&defaults, true).is_empty());
+
+        // Works while typing in an input, but stays quiet behind an open modal dialog.
+        for is_mac in [false, true] {
+            let key = KeyEvent::new("w").with_mod(is_mac).with_alt();
+            let editable = ShortcutContext {
+                editable_target: true,
+                dialog_open: false,
+                is_mac,
+            };
+            let behind_dialog = ShortcutContext {
+                editable_target: false,
+                dialog_open: true,
+                is_mac,
+            };
+            assert_eq!(
+                resolve_shortcut(&key, APP_SHORTCUTS, editable).map(|binding| binding.action),
+                Some(ShortcutAction::SwitchWorkspace)
+            );
+            assert_eq!(resolve_shortcut(&key, APP_SHORTCUTS, behind_dialog), None);
+        }
+
+        // Customizing and unbinding work via overrides.
+        let mut overrides = BTreeMap::new();
+        overrides.insert("switch-workspace".to_string(), "f6".to_string());
+        assert!(is_customized(ShortcutAction::SwitchWorkspace, &overrides));
+        assert_eq!(
+            effective_combo_for(ShortcutAction::SwitchWorkspace, &overrides).as_deref(),
+            Some("f6")
+        );
+        assert!(find_conflicts(&overrides, false).is_empty());
+        assert!(find_conflicts(&overrides, true).is_empty());
+
+        overrides.insert("switch-workspace".to_string(), String::new());
+        assert_eq!(
+            effective_combo_for(ShortcutAction::SwitchWorkspace, &overrides),
+            None
+        );
     }
 }

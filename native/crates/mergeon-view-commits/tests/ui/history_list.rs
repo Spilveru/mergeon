@@ -743,3 +743,37 @@ async fn caches_the_badge_layout_of_each_row_until_the_width_or_its_refs_change(
         .collect();
     assert_eq!(names, ["release"]);
 }
+
+#[gpui_kit::test]
+async fn scroll_selected_into_view_scrolls_back_when_selection_did_not_change(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    let list = mount_list(&app, cx);
+    let commits = history(60, Some(0));
+    let first_hash = commits[0].full_hash.clone();
+    show(&list, commits, cx);
+    list.update(cx, |list, cx| {
+        list.set_selected_commit_hash(Some(&first_hash), cx);
+    });
+    app.in_window(cx, |_, _| {});
+
+    // Desplazar lejos de la fila seleccionada.
+    list.update(cx, |list, _| list.set_scroll_top(600.));
+    app.in_window(cx, |_, _| {});
+    let (top, painted) = list.read_with(cx, |list, _| (list.scroll_top(), list.painted_rows()));
+    assert!(top > 0.);
+    assert!(!painted.contains(&0));
+
+    // Re-seleccionar el mismo hash no hace nada por sí solo, pero
+    // `scroll_selected_into_view` sí devuelve la fila a la vista.
+    list.update(cx, |list, cx| {
+        list.set_selected_commit_hash(Some(&first_hash), cx);
+        list.scroll_selected_into_view();
+        cx.notify();
+    });
+    app.in_window(cx, |_, _| {});
+    let (top, painted) = list.read_with(cx, |list, _| (list.scroll_top(), list.painted_rows()));
+    assert_eq!(top, 0.);
+    assert!(painted.contains(&0));
+}

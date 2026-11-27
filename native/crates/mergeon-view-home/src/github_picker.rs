@@ -9,8 +9,7 @@ use std::ops::Range;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
     IntoElement, ListSizingBehavior, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
-    div, px, rems, uniform_list,
+    Styled as _, Subscription, UniformListScrollHandle, Window, div, px, rems, uniform_list,
 };
 use mergeon_app::AppModel;
 use mergeon_app::github::{InstallationRepository, ListAllRepositoriesOptions};
@@ -25,7 +24,9 @@ use mergeon_ui::{
 
 use crate::avatar::{AvatarCache, avatar};
 use crate::github_account::open_github_account_dialog;
-use crate::parts::{HomeDialogs, card_section, field_label, github_icon, nowrap, picker_label};
+use crate::parts::{
+    HomeDialogs, card_section, field_label, github_icon, nowrap, picker_label, plain_button,
+};
 use crate::util::join_local_path;
 
 const TITLE: &str = "Clone From GitHub";
@@ -65,6 +66,8 @@ pub struct GitHubRepositoryPicker {
     /// (la ventana repintaría con cada aviso suyo).
     shown_model: PickerModelState,
     renders: usize,
+    /// Bloquea `Escape` mientras el clon sigue escribiendo en disco.
+    clone_escape_guard: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -165,6 +168,7 @@ impl GitHubRepositoryPicker {
             shown_results: Vec::new(),
             shown_model,
             renders: 0,
+            clone_escape_guard: None,
             _subscriptions: subscriptions,
         };
 
@@ -203,6 +207,11 @@ impl GitHubRepositoryPicker {
             .iter()
             .find(|account| account.id == id)
             .cloned()
+    }
+
+    fn can_search(&self) -> bool {
+        self.shown_account()
+            .is_some_and(|account| account.requires_installation != Some(true))
     }
 
     /// Cuenta elegida en el selector.
@@ -259,6 +268,9 @@ impl GitHubRepositoryPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_cloning {
+            return;
+        }
         self.selected_repo = Some(item);
         self.sync_destination(window, cx);
         cx.notify();
@@ -410,6 +422,9 @@ impl GitHubRepositoryPicker {
 
     /// `handleClone`.
     fn handle_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_cloning {
+            return;
+        }
         let clone_path = self.clone_path();
         let (Some(item), Some(account)) = (self.selected_repo.clone(), self.selected_account(cx))
         else {
@@ -420,6 +435,16 @@ impl GitHubRepositoryPicker {
         }
 
         self.is_cloning = true;
+        self.clone_escape_guard = Some(cx.intercept_keystrokes(|event, window, cx| {
+            if event.keystroke.key.eq_ignore_ascii_case("escape")
+                && !event.keystroke.modifiers.modified()
+                && dialog::open_titles(window, cx)
+                    .last()
+                    .is_some_and(|title| title.as_ref() == TITLE)
+            {
+                cx.stop_propagation();
+            }
+        }));
         cx.notify();
 
         let clone_url = item.repository.clone_url.clone().unwrap_or_default();
@@ -431,6 +456,7 @@ impl GitHubRepositoryPicker {
             let result = cloning.await;
             this.update_in(cx, |this, window, cx| {
                 this.is_cloning = false;
+                this.clone_escape_guard = None;
                 cx.notify();
                 if let Some(path) = result
                     .path
@@ -450,6 +476,9 @@ impl GitHubRepositoryPicker {
 
     /// `handleClose`.
     fn handle_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_cloning {
+            return;
+        }
         if let Some(id) = self.dialog_id.take() {
             dialog::close_id(window, cx, id);
         }
@@ -546,6 +575,7 @@ impl GitHubRepositoryPicker {
                                     .items(options)
                                     .value(self.selected_account_id.clone().unwrap_or_default())
                                     .placeholder("Select an account")
+                                    .disabled(self.is_cloning)
                                     .on_change(cx.listener(
                                         |this, value: &SharedString, window, cx| {
                                             this.handle_account_change(value, window, cx);
@@ -556,6 +586,7 @@ impl GitHubRepositoryPicker {
                     .child(
                         mergeon_ui::button("github-picker-add-account")
                             .outline()
+                            .disabled(self.is_cloning)
                             .label(if accounts.is_empty() {
                                 "Add Account"
                             } else {
@@ -644,6 +675,7 @@ impl GitHubRepositoryPicker {
         &self,
         item: &InstallationRepository,
         account: Option<&GitHubAccount>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = *cx.palette();
@@ -652,6 +684,11 @@ impl GitHubRepositoryPicker {
             .selected_repo
             .as_ref()
             .is_some_and(|selected| selected.repository.id == repo.id);
+        let repo_label = repo
+            .full_name
+            .clone()
+            .or_else(|| repo.name.clone())
+            .unwrap_or_default();
         let owner_login = repo.owner.login.clone().filter(|login| !login.is_empty());
         let is_foreign = owner_login
             .as_ref()
@@ -662,9 +699,10 @@ impl GitHubRepositoryPicker {
             Radius::Xs.px(cx),
             cx,
         );
-        let chip = || {
+        let chip_radius = Radius::Sm.px(cx);
+        let chip = move || {
             div()
-                .radius(Radius::Sm, cx)
+                .rounded(chip_radius)
                 .bg(palette.secondary)
                 .px_2()
                 .py(rems(0.125))
@@ -676,150 +714,147 @@ impl GitHubRepositoryPicker {
         // Todas las tarjetas miden lo mismo (lo pide la lista virtual): el
         // nombre y la descripción van en una línea, recortados, y la línea de
         // la descripción se reserva aunque no haya.
-        let card = div()
-            .id(SharedString::from(format!(
-                "github-repo:{}",
-                repo.id.unwrap_or_default()
-            )))
-            .test_support()
-            .flex_shrink_0()
-            .cursor_pointer()
-            .radius(Radius::Md, cx)
-            .border_1()
-            .p(rems(0.625))
-            .map(|this| {
-                if selected {
-                    this.border_color(with_alpha(palette.primary, 0.5))
-                        .bg(with_alpha(palette.primary, 0.05))
-                } else {
-                    this.border_color(palette.border)
-                        .bg(with_alpha(palette.card, 0.7))
-                        .hover(|style| {
-                            style
-                                .border_color(with_alpha(palette.primary, 0.3))
-                                .bg(with_alpha(palette.secondary, 0.4))
-                        })
-                }
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_repository(clicked.clone(), window, cx);
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .min_w_0()
-                                    .child(div().flex_shrink_0().child(image.unwrap_or_else(
-                                        || {
-                                            github_icon(px(20.))
-                                                .text_color(palette.muted_foreground)
-                                                .into_any_element()
-                                        },
-                                    )))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .tw_text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(palette.foreground)
-                                            .child(SharedString::from(
-                                                repo.full_name.clone().unwrap_or_default(),
-                                            )),
+        let card = plain_button(
+            SharedString::from(format!("github-repo:{}", repo.id.unwrap_or_default())),
+            Radius::Md.px(cx),
+            window,
+            cx,
+        )
+        .accessibility_label(SharedString::from(repo_label))
+        .selected(selected)
+        .w_full()
+        .flex_col()
+        .items_stretch()
+        .justify_start()
+        .text_left()
+        .flex_shrink_0()
+        .border_1()
+        .p(rems(0.625))
+        .map(|this| {
+            if selected {
+                this.border_color(with_alpha(palette.primary, 0.5))
+                    .bg(with_alpha(palette.primary, 0.05))
+            } else {
+                this.border_color(palette.border)
+                    .bg(with_alpha(palette.card, 0.7))
+                    .hover(|style| {
+                        style
+                            .border_color(with_alpha(palette.primary, 0.3))
+                            .bg(with_alpha(palette.secondary, 0.4))
+                    })
+            }
+        })
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.select_repository(clicked.clone(), window, cx);
+        }))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(div().flex_shrink_0().child(image.unwrap_or_else(|| {
+                                    github_icon(px(20.))
+                                        .text_color(palette.muted_foreground)
+                                        .into_any_element()
+                                })))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .tw_text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(palette.foreground)
+                                        .child(SharedString::from(
+                                            repo.full_name.clone().unwrap_or_default(),
+                                        )),
+                                )
+                                .when(repo.private == Some(true), |this| {
+                                    this.child(
+                                        mergeon_ui::badge("Private")
+                                            .variant(BadgeVariant::Secondary),
                                     )
-                                    .when(repo.private == Some(true), |this| {
-                                        this.child(
-                                            mergeon_ui::badge("Private")
-                                                .variant(BadgeVariant::Secondary),
-                                        )
-                                    })
-                                    .when_some(
-                                        owner_login.filter(|_| is_foreign),
-                                        |this, login| {
-                                            this.child(
-                                                mergeon_ui::badge(login)
-                                                    .variant(BadgeVariant::Outline),
-                                            )
-                                        },
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    // Una línea de `text-xs` (16px), haya o no
-                                    // descripción.
-                                    .h(rems(1.))
-                                    .truncate()
-                                    .tw_text_xs()
-                                    .text_color(palette.muted_foreground)
-                                    .children(
-                                        repo.description
-                                            .clone()
-                                            .filter(|text| !text.is_empty())
-                                            .map(SharedString::from),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        nowrap(format_updated_ago(
-                            repo.updated_at.as_deref().unwrap_or_default(),
-                        ))
-                        .radius(Radius::Md, cx)
-                        .border_1()
-                        .border_color(palette.border)
-                        .bg(with_alpha(palette.background, 0.8))
-                        .px_2()
-                        .py_1()
-                        .tw_text_xs()
-                        .tw_font_medium()
-                        .text_color(palette.muted_foreground),
-                    ),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .flex()
-                    .overflow_hidden()
-                    .gap(rems(0.375))
+                                })
+                                .when_some(owner_login.filter(|_| is_foreign), |this, login| {
+                                    this.child(
+                                        mergeon_ui::badge(login).variant(BadgeVariant::Outline),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                // Una línea de `text-xs` (16px), haya o no
+                                // descripción.
+                                .h(rems(1.))
+                                .truncate()
+                                .tw_text_xs()
+                                .text_color(palette.muted_foreground)
+                                .children(
+                                    repo.description
+                                        .clone()
+                                        .filter(|text| !text.is_empty())
+                                        .map(SharedString::from),
+                                ),
+                        ),
+                )
+                .child(
+                    nowrap(format_updated_ago(
+                        repo.updated_at.as_deref().unwrap_or_default(),
+                    ))
+                    .radius(Radius::Md, cx)
+                    .border_1()
+                    .border_color(palette.border)
+                    .bg(with_alpha(palette.background, 0.8))
+                    .px_2()
+                    .py_1()
                     .tw_text_xs()
-                    .text_color(palette.muted_foreground)
-                    .when_some(
-                        repo.language
-                            .clone()
-                            .filter(|language| !language.is_empty()),
-                        |this, language| {
-                            this.child(
-                                chip()
-                                    .text_color(palette.foreground)
-                                    .child(SharedString::from(language)),
-                            )
-                        },
-                    )
-                    .child(
-                        chip()
-                            .flex()
-                            .items_center()
-                            .gap(space)
-                            // La estrella es un emoji: se pide a la fuente de
-                            // emojis de la plataforma, como hace el navegador.
-                            .child(div().font_family(EMOJI_FONT).child("⭐"))
-                            .child(SharedString::from(repo.stars.unwrap_or(0).to_string())),
-                    )
-                    .child(
-                        chip().child(SharedString::from(format!("⑂ {}", repo.forks.unwrap_or(0)))),
-                    ),
-            );
+                    .tw_font_medium()
+                    .text_color(palette.muted_foreground),
+                ),
+        )
+        .child(
+            div()
+                .mt_2()
+                .flex()
+                .overflow_hidden()
+                .gap(rems(0.375))
+                .tw_text_xs()
+                .text_color(palette.muted_foreground)
+                .when_some(
+                    repo.language
+                        .clone()
+                        .filter(|language| !language.is_empty()),
+                    |this, language| {
+                        this.child(
+                            chip()
+                                .text_color(palette.foreground)
+                                .child(SharedString::from(language)),
+                        )
+                    },
+                )
+                .child(
+                    chip()
+                        .flex()
+                        .items_center()
+                        .gap(space)
+                        // La estrella es un emoji: se pide a la fuente de
+                        // emojis de la plataforma, como hace el navegador.
+                        .child(div().font_family(EMOJI_FONT).child("⭐"))
+                        .child(SharedString::from(repo.stars.unwrap_or(0).to_string())),
+                )
+                .child(chip().child(SharedString::from(format!("⑂ {}", repo.forks.unwrap_or(0))))),
+        );
         // `space-y-2` entre tarjetas.
         div().pb_2().child(card).into_any_element()
     }
@@ -828,6 +863,7 @@ impl GitHubRepositoryPicker {
     fn render_repository_rows(
         &mut self,
         range: Range<usize>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let account = self.shown_account();
@@ -835,7 +871,7 @@ impl GitHubRepositoryPicker {
         indices
             .into_iter()
             .filter_map(|index| self.all_repositories.get(index).cloned())
-            .map(|item| self.render_repository_card(&item, account.as_ref(), cx))
+            .map(|item| self.render_repository_card(&item, account.as_ref(), window, cx))
             .collect()
     }
 
@@ -967,6 +1003,7 @@ impl GitHubRepositoryPicker {
                     .child(
                         mergeon_ui::button("github-picker-cancel")
                             .ghost()
+                            .disabled(is_cloning)
                             .label("Cancel")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.handle_close(window, cx);
@@ -999,9 +1036,7 @@ impl Render for GitHubRepositoryPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let account = self.shown_account();
-        let can_search = account
-            .as_ref()
-            .is_some_and(|account| account.requires_installation != Some(true));
+        let can_search = self.can_search();
         let account_section = self.render_account_section(account.as_ref(), window, cx);
         let results = self.render_results(account.as_ref(), cx);
         let palette = *cx.palette();
@@ -1022,7 +1057,7 @@ impl Render for GitHubRepositoryPicker {
                 this.child(
                     card_section(cx)
                         .child(field_label("Search repositories", cx).mb_2())
-                        .child(mergeon_ui::input(&self.search)),
+                        .child(mergeon_ui::input(&self.search).disabled(self.is_cloning)),
                 )
             })
             .child(
@@ -1045,8 +1080,8 @@ impl Render for GitHubRepositoryPicker {
                                     uniform_list(
                                         "github-picker-repositories",
                                         self.shown_results.len(),
-                                        cx.processor(|this, range, _, cx| {
-                                            this.render_repository_rows(range, cx)
+                                        cx.processor(|this, range, window, cx| {
+                                            this.render_repository_rows(range, window, cx)
                                         }),
                                     )
                                     .track_scroll(&self.results_scroll)
@@ -1113,10 +1148,23 @@ pub fn open_github_repository_picker(
                     .unwrap_or_else(|_| div().into_any_element())
             }
         })
+        .on_confirm({
+            let view = view.downgrade();
+            move |window, cx| {
+                view.update(cx, |view, cx| view.handle_clone(window, cx))
+                    .ok();
+                false
+            }
+        })
         .on_close(|_, cx| closed(cx))
         .open(window, cx);
 
-    view.update(cx, |view, _| view.dialog_id = Some(id));
+    view.update(cx, |view, cx| {
+        view.dialog_id = Some(id);
+        if view.can_search() {
+            view.search.update(cx, |state, cx| state.focus(window, cx));
+        }
+    });
     HomeDialogs::register(TITLE, id, Some(view.clone().into_any()), cx);
     view
 }

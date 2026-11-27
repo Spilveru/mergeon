@@ -875,3 +875,51 @@ async fn direct_mode_tooltips_advertise_shift_and_right_click_for_options(cx: &m
     );
     assert!(!tooltip(&app, cx, "toolbar-fetch").contains("+tags"));
 }
+
+#[gpui_kit::test]
+async fn per_action_dialog_mode_tooltips_only_advertise_shift_and_right_click_for_never(
+    cx: &mut TestAppContext,
+) {
+    use mergeon_app::{ActionDialogMode, RemoteAction};
+
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new().with_origin();
+    app.open(&repo, cx).await;
+
+    let tooltip = |app: &TestApp, cx: &mut TestAppContext, id: &str| {
+        app.in_window(cx, |_, _| {});
+        app.shell
+            .read_with(cx, |shell, cx| {
+                shell.toolbar.read(cx).sync_button_tooltip(id)
+            })
+            .unwrap_or_else(|| panic!("missing tooltip for {id}"))
+    };
+
+    app.model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Fetch, ActionDialogMode::Never, cx)
+        })
+        .await;
+    app.model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Push, ActionDialogMode::Always, cx)
+        })
+        .await;
+
+    let fetch_tip = tooltip(&app, cx, "toolbar-fetch");
+    let pull_tip = tooltip(&app, cx, "toolbar-pull");
+    let push_tip = tooltip(&app, cx, "toolbar-push");
+
+    assert!(
+        fetch_tip.contains("Shift+click or right-click for options"),
+        "{fetch_tip}"
+    );
+    assert!(
+        !pull_tip.contains("Shift+click or right-click for options"),
+        "{pull_tip}"
+    );
+    assert!(
+        !push_tip.contains("Shift+click or right-click for options"),
+        "{push_tip}"
+    );
+}

@@ -24,8 +24,8 @@ use mergeon_model::keyboard_shortcuts::{
 use mergeon_model::resizable_width::ResizableWidth;
 use mergeon_model::sidebar_width::{saved_sidebar_width, sidebar_width, sidebar_width_settings};
 use mergeon_store::{
-    ActionDefaults, DEFAULT_AUTO_FETCH_INTERVAL_MINUTES, EXTERNAL_EDITOR_KEY,
-    ExternalEditorSettings, KEYBOARD_SHORTCUTS_KEY, SKIP_ACTION_DIALOGS_KEY, Settings,
+    ActionDefaults, ActionDialogMode, ActionDialogs, DEFAULT_AUTO_FETCH_INTERVAL_MINUTES,
+    EXTERNAL_EDITOR_KEY, ExternalEditorSettings, KEYBOARD_SHORTCUTS_KEY, RemoteAction, Settings,
     SettingsUpdate, SidebarSections, Theme,
 };
 use serde_json::{Value, json};
@@ -54,6 +54,8 @@ pub(crate) struct SettingsState {
     /// Ejecutar Fetch / Pull / Push directamente sin diálogo cuando hay valores
     /// por defecto seguros (`settings.skipActionDialogs`).
     pub skip_action_dialogs: bool,
+    /// Overrides por acción para el modo de diálogo (`settings.actionDialogs`).
+    pub action_dialogs: ActionDialogs,
     /// Últimas opciones seguras confirmadas en los diálogos de Fetch / Pull / Push
     /// (`settings.actionDefaults`).
     pub action_defaults: ActionDefaults,
@@ -111,6 +113,7 @@ impl Default for SettingsState {
             sidebar_sections: SidebarSections::default(),
             external_editor: ExternalEditorSettings::default(),
             skip_action_dialogs: false,
+            action_dialogs: ActionDialogs::default(),
             action_defaults: ActionDefaults::default(),
             keyboard_shortcuts: BTreeMap::new(),
             local_changes: LocalChangesPrefs::default(),
@@ -270,6 +273,7 @@ impl AppModel {
                 );
                 this.settings.external_editor = settings.external_editor;
                 this.settings.skip_action_dialogs = settings.skip_action_dialogs;
+                this.settings.action_dialogs = settings.action_dialogs;
                 this.settings.action_defaults = settings.action_defaults;
                 let shortcuts = normalize_overrides(&settings.keyboard_shortcuts);
                 let shortcuts_changed = shortcuts != this.settings.keyboard_shortcuts;
@@ -308,26 +312,83 @@ impl AppModel {
     }
 
     // ------------------------------------------------------------------
-    // Ejecución directa de Fetch / Pull / Push (`settings.skipActionDialogs`)
+    // Modo de diálogo de Fetch / Pull / Push (`settings.skipActionDialogs` / `settings.actionDialogs`)
     // ------------------------------------------------------------------
 
-    /// Si Fetch / Pull / Push corren sin diálogo cuando hay valores seguros.
-    pub fn skip_action_dialogs(&self) -> bool {
-        self.settings.skip_action_dialogs
+    /// Modo efectivo de diálogo para una acción remota (`Fetch` / `Pull` / `Push`).
+    pub fn action_dialog_mode(&self, action: RemoteAction) -> ActionDialogMode {
+        self.settings
+            .action_dialogs
+            .resolve(action, self.settings.skip_action_dialogs)
     }
 
-    /// Activa o desactiva la ejecución directa sin diálogo y la guarda.
-    pub fn set_skip_action_dialogs(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<()> {
-        if self.settings.skip_action_dialogs == enabled {
+    /// Cambia el modo de diálogo de una acción remota, canoniza y persiste.
+    pub fn set_action_dialog_mode(
+        &mut self,
+        action: RemoteAction,
+        mode: ActionDialogMode,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let fetch = if action == RemoteAction::Fetch {
+            mode
+        } else {
+            self.action_dialog_mode(RemoteAction::Fetch)
+        };
+        let pull = if action == RemoteAction::Pull {
+            mode
+        } else {
+            self.action_dialog_mode(RemoteAction::Pull)
+        };
+        let push = if action == RemoteAction::Push {
+            mode
+        } else {
+            self.action_dialog_mode(RemoteAction::Push)
+        };
+        let (skip, dialogs) = ActionDialogs::from_modes(fetch, pull, push);
+        if self.settings.skip_action_dialogs == skip && self.settings.action_dialogs == dialogs {
             return Task::ready(());
         }
-        self.settings.skip_action_dialogs = enabled;
+        self.settings.skip_action_dialogs = skip;
+        self.settings.action_dialogs = dialogs;
         cx.notify();
-        self.persist_settings(
-            json!({ SKIP_ACTION_DIALOGS_KEY: enabled }),
-            "Failed to save the direct actions setting",
-            cx,
-        )
+        let update = SettingsUpdate {
+            skip_action_dialogs: Some(skip),
+            action_dialogs: Some(dialogs),
+            ..Default::default()
+        };
+        let patch = serde_json::to_value(&update).unwrap_or(Value::Null);
+        self.persist_settings(patch, "Failed to save the direct actions setting", cx)
+    }
+
+    /// Si Fetch, Pull y Push corren todos sin diálogo cuando hay valores seguros.
+    pub fn skip_action_dialogs(&self) -> bool {
+        self.action_dialog_mode(RemoteAction::Fetch) == ActionDialogMode::Never
+            && self.action_dialog_mode(RemoteAction::Pull) == ActionDialogMode::Never
+            && self.action_dialog_mode(RemoteAction::Push) == ActionDialogMode::Never
+    }
+
+    /// Activa o desactiva la ejecución directa sin diálogo para las tres acciones
+    /// y la guarda limpiando overrides por acción.
+    pub fn set_skip_action_dialogs(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<()> {
+        let target = if enabled {
+            ActionDialogMode::Never
+        } else {
+            ActionDialogMode::Toolbar
+        };
+        let (skip, dialogs) = ActionDialogs::from_modes(target, target, target);
+        if self.settings.skip_action_dialogs == skip && self.settings.action_dialogs == dialogs {
+            return Task::ready(());
+        }
+        self.settings.skip_action_dialogs = skip;
+        self.settings.action_dialogs = dialogs;
+        cx.notify();
+        let update = SettingsUpdate {
+            skip_action_dialogs: Some(skip),
+            action_dialogs: Some(dialogs),
+            ..Default::default()
+        };
+        let patch = serde_json::to_value(&update).unwrap_or(Value::Null);
+        self.persist_settings(patch, "Failed to save the direct actions setting", cx)
     }
 
     // ------------------------------------------------------------------

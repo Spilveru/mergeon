@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use gpui_kit::{App, Entity};
-use mergeon_app::{AppModel, PullRequestsAvailability};
+use mergeon_app::{ActionDialogMode, AppModel, PullRequestsAvailability, RemoteAction};
 use mergeon_model::command_palette::PaletteScope;
 use mergeon_model::keyboard_shortcuts::{ShortcutAction, effective_combo_label, is_mac_platform};
 use mergeon_model::repositories::RepoLifecycleState;
@@ -618,33 +618,52 @@ impl CommandSpec {
         }
     }
 
-    /// Etiqueta visible en la paleta según si la ejecución directa está activa.
-    pub fn display_label(&self, skip_action_dialogs: bool) -> &'static str {
-        if skip_action_dialogs {
-            match self.command {
-                Command::Shortcut(ShortcutAction::Fetch) => return "Fetch",
-                Command::Shortcut(ShortcutAction::Pull) => return "Pull",
-                Command::Shortcut(ShortcutAction::Push) => return "Push",
-                _ => {}
+    /// Etiqueta visible en la paleta según si la ejecución directa está activa
+    /// para la acción correspondiente.
+    pub fn display_label(&self, model: &AppModel) -> &'static str {
+        match self.command {
+            Command::Shortcut(ShortcutAction::Fetch)
+                if model.action_dialog_mode(RemoteAction::Fetch) == ActionDialogMode::Never =>
+            {
+                "Fetch"
             }
+            Command::Shortcut(ShortcutAction::Pull)
+                if model.action_dialog_mode(RemoteAction::Pull) == ActionDialogMode::Never =>
+            {
+                "Pull"
+            }
+            Command::Shortcut(ShortcutAction::Push)
+                if model.action_dialog_mode(RemoteAction::Push) == ActionDialogMode::Never =>
+            {
+                "Push"
+            }
+            _ => self.label,
         }
-        self.label
     }
 
     /// Si el comando debe aparecer en la paleta en el modo actual.
-    pub fn visible(&self, skip_action_dialogs: bool) -> bool {
-        skip_action_dialogs
-            || !matches!(
-                self.command,
-                Command::FetchDialog | Command::PullDialog | Command::PushDialog
-            )
+    pub fn visible(&self, model: &AppModel) -> bool {
+        match self.command {
+            Command::FetchDialog => {
+                model.action_dialog_mode(RemoteAction::Fetch) == ActionDialogMode::Never
+            }
+            Command::PullDialog => {
+                model.action_dialog_mode(RemoteAction::Pull) == ActionDialogMode::Never
+            }
+            Command::PushDialog => {
+                model.action_dialog_mode(RemoteAction::Push) == ActionDialogMode::Never
+            }
+            _ => true,
+        }
     }
 
     /// El atajo efectivo tal como se pinta (`Ctrl+Shift+F`, `⌘⇧F`), teniendo en
     /// cuenta los atajos personalizados del usuario.
     pub fn shortcut_label_with(&self, overrides: &BTreeMap<String, String>) -> Option<String> {
-        let Command::Shortcut(action) = self.command else {
-            return None;
+        let action = match self.command {
+            Command::Shortcut(action) => action,
+            Command::Pick(Picker::Workspace) => ShortcutAction::SwitchWorkspace,
+            _ => return None,
         };
         effective_combo_label(action, overrides, is_mac_platform())
     }
@@ -734,6 +753,7 @@ mod tests {
             .iter()
             .filter_map(|spec| match spec.command {
                 Command::Shortcut(action) => Some(action),
+                Command::Pick(Picker::Workspace) => Some(ShortcutAction::SwitchWorkspace),
                 _ => None,
             })
             .collect();
@@ -881,6 +901,10 @@ mod tests {
         assert_eq!(
             find("redo").shortcut_label(),
             Some(combo_label("mod+shift+z", mac))
+        );
+        assert_eq!(
+            find("switch-workspace").shortcut_label(),
+            Some(combo_label("mod+alt+w", mac))
         );
     }
 }

@@ -90,6 +90,7 @@ pub(crate) fn plain_button(
         .clone();
     let focused = focus_handle.is_focused(window);
     BaseButton::new(id)
+        .key_context(mergeon_ui::BUTTON_KEY_CONTEXT)
         .track_focus(&focus_handle)
         .relative()
         .rounded(radius)

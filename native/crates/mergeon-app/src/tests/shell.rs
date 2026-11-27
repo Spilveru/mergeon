@@ -14,8 +14,9 @@ use serde_json::json;
 
 use super::support::{TestApp, TestRepo};
 use crate::{
-    ActionDefaults, AppEvent, AppModel, CHOOSE_EDITOR_ACTION, DialogRequest, FetchActionDefaults,
-    FetchRequest, PullActionDefaults, PullRequest, PushActionDefaults, PushRequest, WindowRequest,
+    ActionDefaults, ActionDialogMode, ActionDialogs, AppEvent, AppModel, CHOOSE_EDITOR_ACTION,
+    DialogRequest, FetchActionDefaults, FetchRequest, PullActionDefaults, PullRequest,
+    PushActionDefaults, PushRequest, RemoteAction, WindowRequest,
 };
 
 fn dialogs(app: &TestApp) -> Vec<DialogRequest> {
@@ -1171,4 +1172,215 @@ async fn remembered_action_defaults_persist_and_feed_direct_requests(cx: &mut Te
             })
         );
     });
+}
+
+#[gpui_kit::test]
+async fn per_action_dialog_modes_control_toolbar_and_keyboard_independently(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    let synced = TestRepo::new();
+    let origin = synced.add_bare_remote("origin");
+    synced.git(&["push", "-q", "-u", "origin", "main"]);
+    synced.commit_file("ahead.txt", "local\n", "Local commit");
+    app.open(&synced, cx).await;
+
+    // Set Push to Always while Fetch and Pull stay at Toolbar.
+    app.model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Push, ActionDialogMode::Always, cx)
+        })
+        .await;
+    app.model.read_with(cx, |model, _| {
+        assert!(!model.skip_action_dialogs());
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Pull),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Push),
+            ActionDialogMode::Always
+        );
+    });
+    let stored = app.backend.storage().get_settings();
+    assert!(!stored.skip_action_dialogs);
+    assert_eq!(
+        stored.action_dialogs,
+        ActionDialogs {
+            fetch: None,
+            pull: None,
+            push: Some(ActionDialogMode::Always),
+        }
+    );
+
+    // Keyboard Push opens DialogRequest::Push (Always), while keyboard Fetch & Pull run directly (Toolbar).
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Push, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(dialogs(&app), [DialogRequest::Push]);
+    assert_ne!(
+        super::support::git_in(&origin, &["rev-parse", "main"]).trim(),
+        synced.head()
+    );
+
+    app.clear_events();
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Fetch, cx);
+    });
+    app.wait_for(cx, "direct keyboard fetch recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("fetch"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    app.model.update(cx, |model, cx| {
+        model.handle_keyboard_shortcut(ShortcutAction::Pull, cx);
+    });
+    app.wait_for(cx, "direct keyboard pull recorded", |model| {
+        model
+            .operations_log()
+            .entries
+            .iter()
+            .any(|entry| entry.operation.as_deref() == Some("pull"))
+    });
+    assert!(dialogs(&app).is_empty());
+
+    // Setting Fetch and Pull to Never with Push = Always canonicalizes to skipActionDialogs: true + push: always.
+    app.model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Fetch, ActionDialogMode::Never, cx)
+        })
+        .await;
+    app.model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Pull, ActionDialogMode::Never, cx)
+        })
+        .await;
+    let stored = app.backend.storage().get_settings();
+    assert!(stored.skip_action_dialogs);
+    assert_eq!(
+        stored.action_dialogs,
+        ActionDialogs {
+            fetch: None,
+            pull: None,
+            push: Some(ActionDialogMode::Always),
+        }
+    );
+    assert!(
+        !app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+
+    // Reloading settings restores per-action modes.
+    app.model
+        .update(cx, |model, cx| model.load_app_settings(true, cx))
+        .await;
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Pull),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Push),
+            ActionDialogMode::Always
+        );
+    });
+
+    // set_skip_action_dialogs(true) sets all 3 to Never and removes actionDialogs.
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(true, cx))
+        .await;
+    let stored = app.backend.storage().get_settings();
+    assert!(stored.skip_action_dialogs);
+    assert!(stored.action_dialogs.is_empty());
+    assert!(
+        app.model
+            .read_with(cx, |model, _| model.skip_action_dialogs())
+    );
+
+    // set_skip_action_dialogs(false) resets all 3 to Toolbar and removes both keys.
+    app.model
+        .update(cx, |model, cx| model.set_skip_action_dialogs(false, cx))
+        .await;
+    let stored = app.backend.storage().get_settings();
+    assert!(!stored.skip_action_dialogs);
+    assert!(stored.action_dialogs.is_empty());
+}
+
+#[gpui_kit::test]
+async fn remotes_containing_slashes_resolve_in_defaults_pull_and_push(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new();
+    let bare = repo.root().join("team-origin.git");
+    std::fs::create_dir(&bare).unwrap();
+    super::support::git_in(&bare, &["init", "--bare", "-b", "main"]);
+    repo.git(&["remote", "add", "team/origin", &bare.to_string_lossy()]);
+    repo.git(&["checkout", "-q", "-b", "feature/foo"]);
+    repo.git(&["push", "-q", "-u", "team/origin", "feature/foo"]);
+    let new_head = repo.commit_file("slash.txt", "ok\n", "Commit on slashed remote");
+    app.open(&repo, cx).await;
+
+    app.model.read_with(cx, |model, _| {
+        let remotes = model.repositories().active_repository_remotes();
+        let team_origin = remotes
+            .iter()
+            .find(|remote| remote.name == "team/origin")
+            .expect("team/origin remote");
+        assert!(
+            team_origin.branches.iter().any(|b| b == "feature/foo"),
+            "{:?}",
+            team_origin.branches
+        );
+        assert_eq!(model.default_remote_name(), "team/origin");
+        assert_eq!(model.default_remote_branch_name(), "feature/foo");
+        assert_eq!(
+            model.direct_pull_request(),
+            Some(PullRequest {
+                remote: "team/origin".to_string(),
+                branch: Some("feature/foo".to_string()),
+                rebase: false,
+                autostash: false,
+            })
+        );
+        assert_eq!(
+            model.direct_push_request(),
+            Some(PushRequest {
+                branch: "feature/foo".to_string(),
+                destination: "team/origin/feature/foo".to_string(),
+                push_tags: false,
+                force: false,
+            })
+        );
+    });
+
+    app.model
+        .update(cx, |model, cx| {
+            model.handle_push_submit(
+                PushRequest {
+                    branch: "feature/foo".to_string(),
+                    destination: "team/origin/feature/foo".to_string(),
+                    push_tags: false,
+                    force: false,
+                },
+                cx,
+            )
+        })
+        .await;
+    assert_eq!(
+        super::support::git_in(&bare, &["rev-parse", "feature/foo"]).trim(),
+        new_head
+    );
 }

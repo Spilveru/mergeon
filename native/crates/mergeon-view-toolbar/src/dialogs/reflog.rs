@@ -267,6 +267,7 @@ impl ReflogDialog {
             palette.sidebar_row_hover.into()
         };
         BaseButton::new(id)
+            .key_context(mergeon_ui::BUTTON_KEY_CONTEXT)
             .accessibility_label(title)
             .flex()
             .flex_shrink_0()

@@ -1573,3 +1573,37 @@ async fn unrelated_model_notifications_do_not_repaint_the_commits_view(cx: &mut 
     cx.run_until_parked();
     assert_eq!(renders(&view, cx), hidden);
 }
+
+#[gpui_kit::test]
+async fn request_commit_selection_scrolls_an_already_selected_commit_back_into_view(
+    cx: &mut TestAppContext,
+) {
+    let app = TestApp::new(cx);
+    let repo = TestRepo::new();
+    repo.many_commits(60, "commit");
+    let (_, view) = open_view(&app, &repo, true, cx).await;
+
+    let selected = view
+        .read_with(cx, |view, _| {
+            view.selected_commit()
+                .map(|commit| commit.full_hash.clone())
+        })
+        .expect("head commit selected");
+    let list = view.read_with(cx, |view, _| view.history_list().clone());
+    list.update(cx, |list, _| {
+        list.set_scroll_top(30. * mergeon_view_commits::ROW_HEIGHT);
+    });
+    app.in_window(cx, |_, _| {});
+    assert!(!list.read_with(cx, |list, _| list.painted_rows().contains(&0)));
+
+    let loads_before = view.read_with(cx, |view, _| view.history_load_count());
+    view.update(cx, |view, cx| {
+        view.request_commit_selection(&selected, cx);
+    });
+    app.wait_for(cx, &view, "re-selection reload to finish", |view, _| {
+        view.history_load_count() > loads_before && !view.is_loading_history()
+    });
+    app.in_window(cx, |_, _| {});
+
+    assert!(list.read_with(cx, |list, _| list.painted_rows().contains(&0)));
+}

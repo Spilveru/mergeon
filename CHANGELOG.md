@@ -5,6 +5,25 @@ Los cambios notables de Mergeon se documentan en este archivo. El formato sigue
 
 ## [Sin publicar]
 
+## [0.16.0] — 2026-11-27
+
+### Añadido
+
+- **Atajo de teclado y selector rápido de workspaces (#16):** nuevo atajo personalizable **Switch workspace** (`Ctrl+Alt+W` / `⌘⌥W`, configurable en **Settings → Shortcuts**) que abre un selector centrado en el teclado con accesos directos numéricos (`0` para *All*, `1`–`9` para los primeros 9 workspaces), navegación con flechas/`j`/`k`, `Enter`, `Esc` y acceso rápido a **New workspace…**. El atajo activo también se muestra en la paleta de comandos y en el tooltip del selector de la barra de título.
+- **Subcarpetas plegables para ramas con `/` (#17):** las secciones **Branches** y **Remotes** del sidebar ahora agrupan automáticamente las ramas con prefijos separados por `/` (por ejemplo `feature/login`, `feature/auth/oauth` o `fix/crash`) en carpetas plegables anidadas con contador de ramas e indicador de rama activa cuando una carpeta está colapsada. Las carpetas inician desplegadas, se expanden automáticamente al filtrar o cambiar a una rama dentro de una carpeta colapsada, y conservan el nombre completo de cada rama en tooltips, menús contextuales y arrastrar y soltar (**Starred** se mantiene plano).
+- **Control por acción de diálogos para Fetch / Pull / Push:** en **Settings → Git**, la opción global anterior se reemplaza por un selector individual para **Fetch**, **Pull** y **Push** con tres modos: **From toolbar** (por defecto: el botón abre el diálogo y el atajo ejecuta directo), **Always** (tanto botón como atajo abren el diálogo de opciones) y **Never** (ambos ejecutan directo). **Settings → Shortcuts** y los tooltips de la barra de herramientas reflejan en vivo la configuración elegida; las instalaciones existentes con `skipActionDialogs: true` migran automáticamente a `Never` para las tres acciones.
+
+### Corregido
+
+- **Foco y teclado en diálogos, menús y vistas:**
+  - Los ítems de menú contextual que abren diálogos ahora difieren su acción para que el cierre del menú no robe el foco al diálogo recién abierto.
+  - Los atajos de un solo carácter (`Space`, `D`, `↑`/`↓`, etc.) ya no quedan bloqueados en *Local Changes* ni *All Commits* al volver desde otra vista, y dejan de interferir con campos editables.
+  - `Escape` en la búsqueda de diffs (`Ctrl+F`) cierra el buscador limpiamente sin dejar resultados obsoletos ni disparar cambios tras el cierre, devolviendo el foco al diff.
+  - La grabación de atajos en **Settings → Shortcuts** y el foco al reabrir **Settings** limpian y restauran su estado de forma consistente.
+- **Remotos con `/` y operaciones de ramas:**
+  - Las ramas remotas cuyo remoto contiene `/` en el nombre separan correctamente remoto y rama al mostrar badges, hacer checkout o interactuar desde el sidebar.
+  - Se refuerzan las validaciones de rebase y estado de `HEAD` en los menús y acciones de ramas.
+
 ## [0.15.1] — 2026-11-26
 
 ### Corregido

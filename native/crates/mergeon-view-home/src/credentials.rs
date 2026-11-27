@@ -8,9 +8,9 @@ use std::rc::Rc;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, rems,
+    App, AppContext as _, Context, Div, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, rems,
 };
 use mergeon_app::{CredentialsAnswer, CredentialsRequest};
 use mergeon_ui::dialog::{self, AppDialog, DialogId, DialogWidth};
@@ -38,6 +38,7 @@ pub struct CredentialsDialog {
     pub(crate) password: Entity<InputState>,
     remember: bool,
     error: Option<SharedString>,
+    just_advanced_to_password: bool,
     dialog_id: Option<DialogId>,
     responder: Responder,
     _subscriptions: Vec<Subscription>,
@@ -76,11 +77,23 @@ impl CredentialsDialog {
             cx.subscribe_in(
                 &username,
                 window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.just_advanced_to_password = true;
                         this.password
                             .update(cx, |state, cx| state.focus(window, cx));
+                        let view = cx.entity();
+                        window.defer(cx, move |_, cx| {
+                            view.update(cx, |this, _| {
+                                this.just_advanced_to_password = false;
+                            });
+                        });
                     }
+                    InputEvent::Change if this.error.is_some() => {
+                        this.error = None;
+                        cx.notify();
+                    }
+                    _ => {}
                 },
             ),
             cx.subscribe_in(
@@ -105,10 +118,25 @@ impl CredentialsDialog {
             password,
             remember: false,
             error: None,
+            just_advanced_to_password: false,
             dialog_id: None,
             responder,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Enter desde el diálogo: si el foco estaba en el usuario, avanza a la
+    /// contraseña sin disparar una validación prematura.
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.just_advanced_to_password) {
+            return;
+        }
+        if self.username.read(cx).focus_handle(cx).is_focused(window) {
+            self.password
+                .update(cx, |state, cx| state.focus(window, cx));
+            return;
+        }
+        self.submit(window, cx);
     }
 
     /// Valida, responde con lo tecleado, vacía los campos y cierra.
@@ -308,7 +336,7 @@ pub fn open_credentials_dialog(
         .on_confirm({
             let view = view.downgrade();
             move |window, cx| {
-                view.update(cx, |view, cx| view.submit(window, cx)).ok();
+                view.update(cx, |view, cx| view.confirm(window, cx)).ok();
                 false
             }
         })

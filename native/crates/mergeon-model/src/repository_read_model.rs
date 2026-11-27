@@ -111,18 +111,49 @@ pub struct RemoteItem {
     pub branches: Vec<String>,
 }
 
+/// Separa una referencia `<remoto>/<rama>` usando el nombre de remoto
+/// configurado más largo que coincida como prefijo (`"{remote}/"`). Si ningún
+/// remoto configurado coincide, divide en la primera `/`.
+pub fn split_remote_ref<I, S>(reference: &str, remote_names: I) -> Option<(&str, &str)>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let best_len = remote_names
+        .into_iter()
+        .filter_map(|remote| {
+            let remote = remote.as_ref();
+            if remote.is_empty() {
+                return None;
+            }
+            reference
+                .strip_prefix(remote)
+                .filter(|rest| rest.starts_with('/'))
+                .map(|_| remote.len())
+        })
+        .max();
+    if let Some(len) = best_len {
+        return Some((&reference[..len], &reference[len + 1..]));
+    }
+    reference.split_once('/')
+}
+
 pub fn build_remote_items(
     remotes_data: &[RemoteData],
     branch_data: &BranchData,
 ) -> Vec<RemoteItem> {
     let mut remote_branches: HashMap<&str, Vec<String>> = HashMap::new();
+    let remote_names: Vec<&str> = remotes_data
+        .iter()
+        .map(|remote| remote.name.as_str())
+        .collect();
 
     for branch_name in &branch_data.all {
         let Some(short_name) = branch_name.strip_prefix("remotes/") else {
             continue;
         };
         let (remote_name, branch_name_only) =
-            short_name.split_once('/').unwrap_or((short_name, ""));
+            split_remote_ref(short_name, remote_names.iter().copied()).unwrap_or((short_name, ""));
         remote_branches
             .entry(remote_name)
             .or_default()
@@ -243,6 +274,48 @@ mod tests {
         assert_eq!(items[1].branches, ["shared"]);
         assert_eq!(items[2].branches, Vec::<String>::new());
         assert_eq!(build_remote_items(&[], &branch_data()), []);
+    }
+
+    #[test]
+    fn groups_remote_branches_for_remotes_containing_slashes() {
+        let remotes = vec![
+            RemoteData {
+                name: "team".to_string(),
+                ..Default::default()
+            },
+            RemoteData {
+                name: "team/origin".to_string(),
+                ..Default::default()
+            },
+        ];
+        let branches: BranchData = serde_json::from_value(serde_json::json!({
+            "current": "feature/foo",
+            "all": [
+                "feature/foo",
+                "remotes/team/main",
+                "remotes/team/origin/main",
+                "remotes/team/origin/feature/foo"
+            ],
+            "branches": {
+                "feature/foo": { "tracking": "team/origin/feature/foo", "ahead": 0, "behind": 0 }
+            }
+        }))
+        .unwrap();
+
+        let items = build_remote_items(&remotes, &branches);
+        assert_eq!(items[0].name, "team");
+        assert_eq!(items[0].branches, ["main"]);
+        assert_eq!(items[1].name, "team/origin");
+        assert_eq!(items[1].branches, ["main", "feature/foo"]);
+
+        assert_eq!(
+            split_remote_ref("team/origin/feature/foo", ["team", "team/origin"]),
+            Some(("team/origin", "feature/foo"))
+        );
+        assert_eq!(
+            split_remote_ref("unknown/branch/name", ["team/origin"]),
+            Some(("unknown", "branch/name"))
+        );
     }
 
     #[test]

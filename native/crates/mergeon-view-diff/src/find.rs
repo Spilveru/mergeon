@@ -280,7 +280,7 @@ pub(crate) fn open<V: Searchable>(view: &mut V, window: &mut Window, cx: &mut Co
                 &input,
                 window,
                 |view: &mut V, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::Change) {
+                    if matches!(event, InputEvent::Change) && view.find().open {
                         search(view, true, cx);
                     }
                 },
@@ -314,7 +314,11 @@ pub(crate) fn close<V: Searchable>(view: &mut V, window: &mut Window, cx: &mut C
     }
     let find = view.find_mut();
     find.open = false;
+    find.generation += 1;
     find.pending = None;
+    find.searched = None;
+    find.results = Arc::default();
+    find.current = None;
     window.focus(&view.canvas().focus.clone(), cx);
     cx.notify();
 }

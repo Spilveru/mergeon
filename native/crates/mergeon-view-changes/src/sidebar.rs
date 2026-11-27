@@ -1864,6 +1864,9 @@ impl RenderOnce for ChangesSidebar {
         let root = div()
             .id(self.id.clone())
             .test_support()
+            .when_some(self.focus_handle.as_ref(), |root, focus_handle| {
+                root.track_focus(focus_handle)
+            })
             .size_full()
             .min_w_0()
             .overflow_hidden()
@@ -2230,8 +2233,7 @@ impl RenderOnce for ChangesSidebar {
 
         // `.files-container`
         root.when_some(keyboard, |root, keyboard| {
-            root.track_focus(&keyboard.focus_handle.clone())
-                .on_key_down(move |event, window, cx| keyboard.handle(event, window, cx))
+            root.on_key_down(move |event, window, cx| keyboard.handle(event, window, cx))
         })
         .child(
             div()

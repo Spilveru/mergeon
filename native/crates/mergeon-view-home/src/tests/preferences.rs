@@ -443,27 +443,88 @@ async fn choosing_a_custom_command_focuses_the_command_field(cx: &mut TestAppCon
 async fn skip_action_dialogs_setting_is_toggled_and_persisted_in_git_preferences(
     cx: &mut TestAppContext,
 ) {
+    use gpui_kit::test::TestWindowExt as _;
+    use mergeon_app::{ActionDialogMode, RemoteAction};
+
     let (app, _workspace, _repository, _panel) = preferences(cx);
     assert!(app.exists(cx, "prefs-actions-section"));
-    assert!(app.exists(cx, "prefs-skip-action-dialogs"));
-    assert!(
-        !app.model
-            .read_with(cx, |model, _| model.skip_action_dialogs())
+    assert!(app.exists(cx, "prefs-action-dialog-fetch"));
+    assert!(app.exists(cx, "prefs-action-dialog-pull"));
+    assert!(app.exists(cx, "prefs-action-dialog-push"));
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Pull),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Push),
+            ActionDialogMode::Toolbar
+        );
+    });
+
+    // Push -> Always (option 1: "From toolbar", "Always", "Never").
+    app.click(cx, "prefs-action-dialog-push");
+    app.in_window(cx, |window, cx| {
+        window.within("popup-menu").click(1, cx);
+    });
+    app.settle(cx);
+
+    // Fetch -> Never (option 2).
+    app.click(cx, "prefs-action-dialog-fetch");
+    app.in_window(cx, |window, cx| {
+        window.within("popup-menu").click(2, cx);
+    });
+    app.settle(cx);
+
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Pull),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Push),
+            ActionDialogMode::Always
+        );
+    });
+
+    // Reload from storage to verify persistence.
+    app.model
+        .update(cx, |model, cx| model.load_app_settings(true, cx))
+        .detach();
+    app.settle(cx);
+
+    app.model.read_with(cx, |model, _| {
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Fetch),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Pull),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            model.action_dialog_mode(RemoteAction::Push),
+            ActionDialogMode::Always
+        );
+    });
+    assert_eq!(
+        app.label(cx, "prefs-action-dialog-fetch").as_deref(),
+        Some("Never")
     );
-
-    app.click(cx, "prefs-skip-action-dialogs");
-
-    assert!(
-        app.model
-            .read_with(cx, |model, _| model.skip_action_dialogs())
+    assert_eq!(
+        app.label(cx, "prefs-action-dialog-pull").as_deref(),
+        Some("From toolbar")
     );
-    assert!(app.backend.storage().get_settings().skip_action_dialogs);
-
-    app.click(cx, "prefs-skip-action-dialogs");
-
-    assert!(
-        !app.model
-            .read_with(cx, |model, _| model.skip_action_dialogs())
+    assert_eq!(
+        app.label(cx, "prefs-action-dialog-push").as_deref(),
+        Some("Always")
     );
-    assert!(!app.backend.storage().get_settings().skip_action_dialogs);
 }

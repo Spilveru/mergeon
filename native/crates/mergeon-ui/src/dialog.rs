@@ -33,8 +33,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::base::{Button as BaseButton, Dialog as BaseDialog};
-use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::base::{Button as BaseButton, Dialog as BaseDialog, active_focus_trap};
+use gpui_kit::component::input::{
+    Enter, IndentInline, InputEvent, InputState, OutdentInline, TextareaState,
+};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -42,7 +44,7 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, Entity,
     FocusHandle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    WeakFocusHandle, Window, div, px, rems,
+    TestSupportExt as _, WeakFocusHandle, Window, div, px, rems,
 };
 
 use crate::Lucide;
@@ -289,7 +291,15 @@ impl DialogStack {
         self.next_id += 1;
         let id = DialogId(self.next_id);
         let focus_handle = cx.focus_handle();
-        let previous_focus = window.focused(cx).map(|handle| handle.downgrade());
+        // Si el diálogo se abrió desde un menú emergente, ese menú está a punto
+        // de cerrarse y desmontarse: no tiene sentido devolverle el foco al salir.
+        let from_popup_menu = window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains("PopupMenu"));
+        let previous_focus = (!from_popup_menu)
+            .then(|| window.focused(cx).map(|handle| handle.downgrade()))
+            .flatten();
         focus_handle.focus(window, cx);
         self.dialogs.push(ActiveDialog {
             id,
@@ -826,13 +836,19 @@ fn open_confirm(
         let checked = checked.clone();
         dialog = dialog.body(move |_, _| {
             let state = checked.clone();
-            checkbox("confirm-option")
-                .label(option.label.clone())
-                .checked(checked.get())
-                .on_click(move |value, window, _| {
-                    state.set(*value);
-                    window.refresh();
-                })
+            div()
+                // En un confirm destructivo, Enter sobre la casilla la alterna
+                // en vez de disparar el borrado accidentalmente.
+                .when(destructive, |this| this.key_context(BUTTON_KEY_CONTEXT))
+                .child(
+                    checkbox("confirm-option")
+                        .label(option.label.clone())
+                        .checked(checked.get())
+                        .on_click(move |value, window, _| {
+                            state.set(*value);
+                            window.refresh();
+                        }),
+                )
         });
     }
 
@@ -869,8 +885,10 @@ enum PromptField {
 /// Contenido del prompt: el campo y su mensaje de error.
 struct PromptView {
     field: PromptField,
+    rows: usize,
     error: Option<SharedString>,
-    _subscription: Option<Subscription>,
+    accept: PromptAccept,
+    _subscription: Subscription,
 }
 
 impl PromptView {
@@ -882,9 +900,37 @@ impl PromptView {
     }
 }
 
+/// Avanza o retrocede el foco respetando la trampa de foco activa (el diálogo),
+/// igual que `Root::on_action_tab` / `on_action_tab_prev`.
+fn focus_in_trap(window: &mut Window, cx: &mut App, forward: bool) {
+    let step = |window: &mut Window, cx: &mut App| {
+        if forward {
+            window.focus_next(cx);
+        } else {
+            window.focus_prev(cx);
+        }
+    };
+    if let Some(container) = active_focus_trap(window, cx) {
+        let before = window.focused(cx);
+        step(window, cx);
+        if !container.contains_focused(window, cx) {
+            for _ in 0..100 {
+                step(window, cx);
+                if container.contains_focused(window, cx) || window.focused(cx) == before {
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    step(window, cx);
+}
+
 impl Render for PromptView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let destructive = cx.palette().destructive;
+        let accept = self.accept.clone();
+        let view = cx.entity();
         div()
             .flex()
             .flex_col()
@@ -892,10 +938,37 @@ impl Render for PromptView {
             .gap(rems(0.625))
             .child(match &self.field {
                 PromptField::Input(state) => crate::input::input(state).into_any_element(),
-                PromptField::Textarea(state) => crate::input::textarea(state).into_any_element(),
+                PromptField::Textarea(state) => div()
+                    .id("prompt-textarea")
+                    .capture_action(move |action: &Enter, window, cx| {
+                        if action.secondary {
+                            cx.stop_propagation();
+                            let view = view.clone();
+                            let accept = accept.clone();
+                            window.defer(cx, move |window, cx| accept(&view, window, cx));
+                        }
+                    })
+                    .capture_action(|_: &IndentInline, window, cx| {
+                        cx.stop_propagation();
+                        focus_in_trap(window, cx, true);
+                    })
+                    .capture_action(|_: &OutdentInline, window, cx| {
+                        cx.stop_propagation();
+                        focus_in_trap(window, cx, false);
+                    })
+                    .child(crate::input::textarea(state).rows(self.rows))
+                    .test_support()
+                    .into_any_element(),
             })
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().tw_text_xs().text_color(destructive).child(error))
+                this.child(
+                    div()
+                        .id("prompt-error")
+                        .tw_text_xs()
+                        .text_color(destructive)
+                        .child(error)
+                        .test_support(),
+                )
             })
     }
 }
@@ -950,18 +1023,29 @@ pub fn prompt(
     let view = cx.new(|cx| {
         let placeholder = options.placeholder.clone();
         let default_value = options.default_value.clone();
+        let rows = if options.rows == 0 { 3 } else { options.rows };
         if options.textarea {
-            let rows = if options.rows == 0 { 3 } else { options.rows };
             let state = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .rows(rows)
                     .placeholder(placeholder)
                     .default_value(default_value)
             });
+            let subscription = cx.subscribe_in(
+                &state,
+                window,
+                move |this: &mut PromptView, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) && this.error.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            );
             PromptView {
                 field: PromptField::Textarea(state),
+                rows,
                 error: None,
-                _subscription: None,
+                accept: accept.clone(),
+                _subscription: subscription,
             }
         } else {
             // `set_value` y no `default_value`: deja el cursor al final del
@@ -971,23 +1055,31 @@ pub fn prompt(
                 state.set_value(default_value, window, cx);
                 state
             });
-            // Enter dentro del campo confirma, como el botón.
-            let accept = accept.clone();
+            // Enter dentro del campo confirma, como el botón; editar borra el error.
+            let accept_on_enter = accept.clone();
             let subscription = cx.subscribe_in(
                 &state,
                 window,
-                move |_, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
+                move |this: &mut PromptView, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => {
+                        if this.error.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::PressEnter { .. } => {
                         let view = cx.entity();
-                        let accept = accept.clone();
+                        let accept = accept_on_enter.clone();
                         window.defer(cx, move |window, cx| accept(&view, window, cx));
                     }
+                    _ => {}
                 },
             );
             PromptView {
                 field: PromptField::Input(state),
+                rows,
                 error: None,
-                _subscription: Some(subscription),
+                accept: accept.clone(),
+                _subscription: subscription,
             }
         }
     });

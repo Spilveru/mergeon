@@ -57,7 +57,7 @@
 | **Branches, Worktrees & Stashes** | Interactive rebase, fixups & autosquash, branch comparison (`A...B` and direct), merged branch cleanup, selective stashes, Git worktrees, tags, remotes, and submodules |
 | **Undo / Redo** | Per-repository undo/redo stack (`Ctrl+Z` / `Ctrl+Y`) covering commits, amends, merges, rebases, resets, branch/tag/stash ops, and file discards |
 | **GitHub Integration** | OAuth device flow sign-in, repository browser & cloning, Pull Requests & CI check status right in the sidebar and status bar |
-| **Workspace & Productivity** | Multi-repo tabs, preview/pinned file tabs, file history (`--follow`) & navigable blame, command palette (`Ctrl+Shift+P`), light & dark themes, per-repo serialized Git mutation queue |
+| **Workspace & Productivity** | Multi-repo tabs with named workspaces (repo groups), customizable keyboard shortcuts (`Ctrl+/`) with direct Fetch/Pull/Push and remembered dialog options, preview/pinned file tabs, file history (`--follow`) & navigable blame, command palette (`Ctrl+Shift+P`), light & dark themes, per-repo serialized Git mutation queue |
 
 ## Installation
 

@@ -19,6 +19,9 @@ use gpui_kit::{
 };
 use mergeon_app::{AppEvent, AppModel, CheckoutTarget, OpenRepository, SyncRequest};
 use mergeon_backend::{CommitSearchOptions, CompareMode, StashEntry, Submodule};
+use mergeon_model::branch_tree::{
+    BranchTreeNode, BranchTreeRow, branch_ancestor_folders, build_branch_tree, flatten_branch_tree,
+};
 use mergeon_model::format::now_epoch_ms;
 use mergeon_model::repositories::SidebarFlags;
 use mergeon_model::repository_read_model::{BranchItem, RemoteItem};
@@ -169,17 +172,30 @@ pub(crate) struct PendingCheckout {
     pub target: CheckoutTarget,
 }
 
-/// Una fila de la sección Remotes: un remoto o una de sus ramas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Una fila de la sección Remotes: un remoto, una carpeta de ramas o una rama.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteRow {
     Remote(usize),
-    Branch(usize, usize),
+    Folder {
+        remote: usize,
+        path: String,
+        label: String,
+        branch_count: usize,
+        depth: usize,
+        expanded: bool,
+    },
+    Branch {
+        remote: usize,
+        index: usize,
+        label: String,
+        depth: usize,
+    },
 }
 
 /// Lo que el sidebar pinta del repositorio activo: una copia que se hace una
 /// vez por cambio de esos datos, no en cada frame, y que las filas comparten
 /// por `Rc`. Trae ya calculado lo que cada fila consultaba (nombres en
-/// minúsculas para el filtro, qué ramas están destacadas, las filas de
+/// minúsculas para el filtro, qué ramas están destacadas, los árboles de
 /// Remotes).
 pub(crate) struct SidebarData {
     pub repo_id: String,
@@ -192,9 +208,9 @@ pub(crate) struct SidebarData {
     /// Si la destacada `i` sigue siendo una rama local (si no, no hay menú).
     pub starred_exists: Vec<bool>,
     pub remotes: Vec<RemoteItem>,
-    /// Cada remoto seguido de sus ramas, en orden (compartidas: las filas
-    /// virtuales las recorren en cada frame sin copiarlas).
-    pub remote_rows: Rc<[RemoteRow]>,
+    /// Árbol de ramas de cada remoto (en el mismo orden que `remotes`), con el
+    /// índice de cada rama dentro de `remotes[remote].branches`.
+    pub remote_trees: Vec<Vec<BranchTreeNode<usize>>>,
     pub tags: Vec<String>,
     pub stashes: Vec<StashEntry>,
     pub submodules: Vec<Submodule>,
@@ -204,9 +220,6 @@ pub(crate) struct SidebarData {
     pub first_load: SidebarFlags,
     /// El tamaño de letra base con el que se calcularon los altos.
     rem: Pixels,
-    /// Alto de las filas de Remotes: cada remoto con sus ramas forma un grupo
-    /// con 0.075rem de aire debajo.
-    pub remote_heights: RowHeights,
 }
 
 impl SidebarData {
@@ -221,22 +234,17 @@ impl SidebarData {
             .iter()
             .map(|branch| branch.name.as_str())
             .collect();
-        let remote_rows = repository
+        let remote_trees = repository
             .remotes
             .iter()
-            .enumerate()
-            .flat_map(|(remote, item)| {
-                std::iter::once(RemoteRow::Remote(remote))
-                    .chain((0..item.branches.len()).map(move |ix| RemoteRow::Branch(remote, ix)))
+            .map(|remote| {
+                build_branch_tree(
+                    (0..remote.branches.len()).collect(),
+                    |&ix| remote.branches[ix].as_str(),
+                    |_| false,
+                )
             })
-            .collect::<Rc<[_]>>();
-        let row = f32::from(section::row_height(rem));
-        let gap = f32::from(rem) * 0.075;
-        let remote_heights =
-            RowHeights::from_extents(remote_rows.iter().enumerate().map(|(ix, _)| {
-                let ends_group = !matches!(remote_rows.get(ix + 1), Some(RemoteRow::Branch(..)));
-                (row, if ends_group { gap } else { 0. })
-            }));
+            .collect();
         Self {
             repo_id: repository.id.clone(),
             branch_names_lower: repository
@@ -257,14 +265,13 @@ impl SidebarData {
             branches: repository.branches.clone(),
             starred_branches: repository.starred_branches.clone(),
             remotes: repository.remotes.clone(),
-            remote_rows,
+            remote_trees,
             tags: repository.tags.clone(),
             stashes: repository.stashes.clone(),
             submodules: repository.submodules.clone(),
             submodules_loading: repository.sidebar_loading.submodules,
             first_load: first_load(repository),
             rem,
-            remote_heights,
         }
     }
 
@@ -372,11 +379,30 @@ fn section_expanded_in(sections: &mergeon_store::SidebarSections, section: Secti
     }
 }
 
-/// Las ramas que deja pasar el filtro, recordadas por datos y texto.
+/// Las ramas que deja pasar el filtro y su árbol, recordados por datos y texto.
 struct FilterCache {
     data: Rc<SidebarData>,
     query: String,
     rows: Rc<[usize]>,
+    tree: Rc<[BranchTreeNode<usize>]>,
+}
+
+/// Filas visibles de la sección Branches (carpetas y ramas), recordadas por
+/// árbol, estado del filtro y versión de carpetas plegadas.
+struct BranchRowsCache {
+    tree: Rc<[BranchTreeNode<usize>]>,
+    filter_active: bool,
+    folder_version: u64,
+    rows: Rc<[BranchTreeRow<usize>]>,
+}
+
+/// Filas visibles de la sección Remotes y sus altos, recordados por datos y
+/// versión de carpetas remotas plegadas.
+struct RemoteRowsCache {
+    data: Rc<SidebarData>,
+    folder_version: u64,
+    rows: Rc<[RemoteRow]>,
+    heights: RowHeights,
 }
 
 /// Lo que necesita un frame: los datos compartidos y lo poco que cambia sin
@@ -385,6 +411,13 @@ pub(crate) struct RepoSnapshot {
     pub data: Rc<SidebarData>,
     /// Índices en `data.branches` de las ramas que deja pasar el filtro.
     pub filtered_branches: Rc<[usize]>,
+    /// Filas visibles de Branches (carpetas y ramas).
+    pub branch_rows: Rc<[BranchTreeRow<usize>]>,
+    /// Filas visibles de Remotes (remotos, carpetas y ramas).
+    pub remote_rows: Rc<[RemoteRow]>,
+    /// Alto de las filas de Remotes: cada remoto con sus ramas forma un grupo
+    /// con 0.075rem de aire debajo.
+    pub remote_heights: RowHeights,
     pub current_branch: String,
     pub detached_head_label: String,
     pub viewed_ref: Option<String>,
@@ -462,6 +495,15 @@ pub struct Sidebar {
     /// Cuántas veces se pintó (tests).
     renders: usize,
     filter_cache: Option<FilterCache>,
+    /// Carpetas plegadas en Branches (ruta completa, p. ej. `"feature/auth"`).
+    /// Las carpetas arrancan desplegadas.
+    pub(crate) collapsed_branch_folders: HashSet<String>,
+    /// Carpetas plegadas en Remotes, por `(remoto, ruta)`.
+    pub(crate) collapsed_remote_branch_folders: HashSet<(String, String)>,
+    branch_folder_version: u64,
+    remote_folder_version: u64,
+    branch_rows_cache: Option<BranchRowsCache>,
+    remote_rows_cache: Option<RemoteRowsCache>,
     /// Cuántas veces se copiaron los datos o se filtraron las ramas (tests).
     data_builds: usize,
     filter_builds: usize,
@@ -590,6 +632,12 @@ impl Sidebar {
             render_key,
             renders: 0,
             filter_cache: None,
+            collapsed_branch_folders: HashSet::new(),
+            collapsed_remote_branch_folders: HashSet::new(),
+            branch_folder_version: 0,
+            remote_folder_version: 0,
+            branch_rows_cache: None,
+            remote_rows_cache: None,
             data_builds: 0,
             filter_builds: 0,
             pull_requests: {
@@ -819,19 +867,119 @@ impl Sidebar {
 
         let query = self.filter.read(cx).value().to_lowercase();
         let filter_active = !query.is_empty();
-        let filtered_branches = match &self.filter_cache {
+        let (filtered_branches, branch_tree) = match &self.filter_cache {
             Some(cache) if Rc::ptr_eq(&cache.data, &data) && cache.query == query => {
-                cache.rows.clone()
+                (cache.rows.clone(), cache.tree.clone())
             }
             _ => {
-                let rows: Rc<[usize]> = data.filter_branches(&query).into();
+                let filtered = data.filter_branches(&query);
+                let tree: Rc<[BranchTreeNode<usize>]> = build_branch_tree(
+                    filtered.clone(),
+                    |&ix| data.branches[ix].name.as_str(),
+                    |&ix| data.branches[ix].active,
+                )
+                .into();
+                let rows: Rc<[usize]> = filtered.into();
                 self.filter_builds += 1;
                 self.filter_cache = Some(FilterCache {
                     data: data.clone(),
                     query,
                     rows: rows.clone(),
+                    tree: tree.clone(),
+                });
+                (rows, tree)
+            }
+        };
+
+        let branch_rows = match &self.branch_rows_cache {
+            Some(cache)
+                if Rc::ptr_eq(&cache.tree, &branch_tree)
+                    && cache.filter_active == filter_active
+                    && cache.folder_version == self.branch_folder_version =>
+            {
+                cache.rows.clone()
+            }
+            _ => {
+                let rows: Rc<[BranchTreeRow<usize>]> = flatten_branch_tree(&branch_tree, |path| {
+                    filter_active || !self.collapsed_branch_folders.contains(path)
+                })
+                .into();
+                self.branch_rows_cache = Some(BranchRowsCache {
+                    tree: branch_tree,
+                    filter_active,
+                    folder_version: self.branch_folder_version,
+                    rows: rows.clone(),
                 });
                 rows
+            }
+        };
+
+        let (remote_rows, remote_heights) = match &self.remote_rows_cache {
+            Some(cache)
+                if Rc::ptr_eq(&cache.data, &data)
+                    && cache.folder_version == self.remote_folder_version =>
+            {
+                (cache.rows.clone(), cache.heights.clone())
+            }
+            _ => {
+                let mut rows = Vec::new();
+                for (remote_ix, (remote, tree)) in data
+                    .remotes
+                    .iter()
+                    .zip(data.remote_trees.iter())
+                    .enumerate()
+                {
+                    rows.push(RemoteRow::Remote(remote_ix));
+                    let remote_name = remote.name.as_str();
+                    let collapsed = &self.collapsed_remote_branch_folders;
+                    let flat = flatten_branch_tree(tree, |path| {
+                        collapsed.is_empty()
+                            || !collapsed.contains(&(remote_name.to_string(), path.to_string()))
+                    });
+                    for item in flat {
+                        match item {
+                            BranchTreeRow::Folder {
+                                path,
+                                label,
+                                branch_count,
+                                depth,
+                                expanded,
+                                ..
+                            } => rows.push(RemoteRow::Folder {
+                                remote: remote_ix,
+                                path,
+                                label,
+                                branch_count,
+                                depth,
+                                expanded,
+                            }),
+                            BranchTreeRow::Branch {
+                                label,
+                                depth,
+                                item: index,
+                            } => rows.push(RemoteRow::Branch {
+                                remote: remote_ix,
+                                index,
+                                label,
+                                depth,
+                            }),
+                        }
+                    }
+                }
+                let row = f32::from(section::row_height(data.rem));
+                let gap = f32::from(data.rem) * 0.075;
+                let heights = RowHeights::from_extents(rows.iter().enumerate().map(|(ix, _)| {
+                    let ends_group = matches!(rows.get(ix + 1), None | Some(RemoteRow::Remote(_)));
+                    (row, if ends_group { gap } else { 0. })
+                }));
+                let rows: Rc<[RemoteRow]> = rows.into();
+                self.remote_rows_cache = Some(RemoteRowsCache {
+                    data: data.clone(),
+                    folder_version: self.remote_folder_version,
+                    rows: rows.clone(),
+                    heights: heights.clone(),
+                });
+                (rows, heights)
             }
         };
 
@@ -839,6 +987,9 @@ impl Sidebar {
         let request = self.selection_requests.get(&data.repo_id);
         Some(Rc::new(RepoSnapshot {
             filtered_branches,
+            branch_rows,
+            remote_rows,
+            remote_heights,
             current_branch: key.current_branch.clone().unwrap_or_default(),
             detached_head_label: detached_head_label(
                 key.current_branch.as_deref(),
@@ -872,6 +1023,8 @@ impl Sidebar {
             self.data_builds += 1;
         } else {
             self.filter_cache = None;
+            self.branch_rows_cache = None;
+            self.remote_rows_cache = None;
         }
         true
     }
@@ -889,7 +1042,11 @@ impl Sidebar {
         if self.render_key == key {
             return false;
         }
+        let branch_changed = self.render_key.current_branch != key.current_branch;
         self.render_key = key;
+        if branch_changed && let Some(current) = self.render_key.current_branch.clone() {
+            self.expand_branch_ancestors(&current);
+        }
         true
     }
 
@@ -992,6 +1149,12 @@ impl Sidebar {
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.panel_mode = PanelMode::Repository;
         self.dragged_branch = None;
+        self.collapsed_branch_folders.clear();
+        self.collapsed_remote_branch_folders.clear();
+        self.branch_folder_version = self.branch_folder_version.wrapping_add(1);
+        self.remote_folder_version = self.remote_folder_version.wrapping_add(1);
+        self.branch_rows_cache = None;
+        self.remote_rows_cache = None;
         // Una navegación en vuelo era del repositorio anterior.
         self.navigate_token += 1;
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
@@ -1128,6 +1291,45 @@ impl Sidebar {
             Section::Submodules => SyncRequest::new().submodules(true),
         };
         flows::ensure_loaded(&self.model, &repo.id, request, cx);
+    }
+
+    /// Pliega o despliega una carpeta de ramas locales (por su ruta completa).
+    pub(crate) fn toggle_branch_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_branch_folders.remove(path) {
+            self.collapsed_branch_folders.insert(path.to_string());
+        }
+        self.branch_folder_version = self.branch_folder_version.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// Pliega o despliega una carpeta de ramas dentro de un remoto.
+    pub(crate) fn toggle_remote_branch_folder(
+        &mut self,
+        remote: &str,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (remote.to_string(), path.to_string());
+        if !self.collapsed_remote_branch_folders.remove(&key) {
+            self.collapsed_remote_branch_folders.insert(key);
+        }
+        self.remote_folder_version = self.remote_folder_version.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// Asegura que las carpetas ancestro de `branch_name` estén desplegadas
+    /// (p. ej. tras cambiar HEAD a una rama dentro de una carpeta plegada).
+    fn expand_branch_ancestors(&mut self, branch_name: &str) -> bool {
+        let mut changed = false;
+        for ancestor in branch_ancestor_folders(branch_name) {
+            if self.collapsed_branch_folders.remove(&ancestor) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.branch_folder_version = self.branch_folder_version.wrapping_add(1);
+        }
+        changed
     }
 
     // ------------------------------------------------------------------

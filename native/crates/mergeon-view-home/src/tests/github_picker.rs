@@ -771,3 +771,127 @@ fn search_matches_names_and_descriptions() {
     assert_eq!(found("landing"), ["ana/website"]);
     assert!(found("nothing").is_empty());
 }
+
+#[gpui_kit::test]
+async fn search_is_focused_on_open_and_repo_cards_are_keyboard_accessible(cx: &mut TestAppContext) {
+    use gpui_kit::Focusable as _;
+
+    let app = start(
+        &[installed(json!([{ "id": 1, "accountLogin": "Spilveru" }]))],
+        cx,
+    );
+    app.github.respond_with(|_| {
+        repositories(json!([
+            {
+                "id": 1,
+                "name": "first",
+                "full_name": "Spilveru/first",
+                "updated_at": "2026-06-01T00:00:00Z",
+                "owner": { "login": "Spilveru" }
+            },
+            {
+                "id": 2,
+                "name": "second",
+                "full_name": "Spilveru/second",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "owner": { "login": "Spilveru" }
+            }
+        ]))
+    });
+
+    let picker = open(&app, cx);
+
+    // Search input receives focus automatically when the picker opens.
+    let search_focused = app.in_window(cx, |window, cx| {
+        picker
+            .read(cx)
+            .search
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    });
+    assert!(search_focused, "search input should be focused on open");
+    assert_eq!(
+        app.label(cx, repo_card(1)).as_deref(),
+        Some("Spilveru/first")
+    );
+
+    // Tab reaches the repository cards and Enter selects the focused card.
+    let mut card_focused = false;
+    for _ in 0..12 {
+        if app.in_window(cx, |window, _| {
+            window.find(repo_card(1)).focused() == Some(true)
+        }) {
+            card_focused = true;
+            break;
+        }
+        app.in_window(cx, |window, cx| window.press("tab", cx));
+    }
+    assert!(card_focused, "repo card should be reachable via Tab");
+
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    app.settle(cx);
+
+    picker.read_with(cx, |picker, _| {
+        assert_eq!(
+            picker
+                .selected_repository()
+                .and_then(|item| item.repository.id),
+            Some(1)
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn cancel_and_escape_are_blocked_while_cloning(cx: &mut TestAppContext) {
+    let workspace = Workspace::new();
+    let remote = workspace.bare_remote("shared-repo");
+    let destination = workspace.directory("workspace");
+    let destination_dir = workspace.base.join("workspace");
+    let app = start(
+        &[installed(json!([{ "id": 1, "accountLogin": "Spilveru" }]))],
+        cx,
+    );
+    app.github.respond_with(move |_| {
+        repositories(json!([{
+            "id": 2,
+            "name": "shared-repo",
+            "full_name": "Spilveru/shared-repo",
+            "clone_url": remote,
+            "private": false,
+            "owner": { "login": "Spilveru" }
+        }]))
+    });
+    app.host.answer_directory(Some(&destination_dir));
+
+    let picker = open(&app, cx);
+    app.click(cx, repo_card(2));
+    app.click(cx, "github-picker-browse");
+
+    // Start the clone without yielding so we can inspect the in-flight state deterministically.
+    app.in_window(cx, |window, cx| {
+        window.click("github-picker-clone", cx);
+        window.render_frame(cx);
+        assert!(picker.read(cx).is_cloning());
+
+        // Cancel button is disabled and Escape is ignored while cloning.
+        window.click("github-picker-cancel", cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            mergeon_ui::dialog::open_titles(window, cx),
+            ["Clone From GitHub"]
+        );
+    });
+
+    let clone_path = format!("{destination}/shared-repo");
+    app.wait_for(cx, "the clone to finish and open", |cx| {
+        app.model.read_with(cx, |model, _| {
+            model
+                .open_repositories()
+                .iter()
+                .any(|repo| repo.path == clone_path)
+        })
+    });
+    assert!(app.dialog_titles(cx).is_empty());
+}

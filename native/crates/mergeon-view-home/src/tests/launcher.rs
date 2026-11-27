@@ -105,3 +105,34 @@ async fn the_launcher_opens_once_and_reports_the_requests_it_handles(cx: &mut Te
     });
     assert_eq!(app.dialog_titles(cx), ["Open repository"]);
 }
+
+#[gpui_kit::test]
+async fn enter_on_focused_launcher_option_activates_it(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+
+    let app = TestApp::new(cx);
+    app.host.answer_directory(None);
+
+    app.in_window(cx, |window, cx| {
+        open_repository_launcher(window, cx);
+    });
+    assert_eq!(app.dialog_titles(cx), ["Open repository"]);
+
+    let mut focused = false;
+    for _ in 0..12 {
+        if app.in_window(cx, |window, _| {
+            window.find("launcher-local").focused() == Some(true)
+        }) {
+            focused = true;
+            break;
+        }
+        app.in_window(cx, |window, cx| window.press("tab", cx));
+    }
+    assert!(focused, "launcher-local should be reachable with Tab");
+
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    app.settle(cx);
+
+    assert!(app.dialog_titles(cx).is_empty());
+    assert_eq!(app.host.directory_requests(), 1);
+}

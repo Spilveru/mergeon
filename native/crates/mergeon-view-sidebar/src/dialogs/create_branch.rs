@@ -163,8 +163,11 @@ impl CreateBranchDialog {
         if !self.is_submittable(cx) {
             return;
         }
+        let Some(id) = self.dialog_id.take() else {
+            return;
+        };
         let branch_name = self.branch_name(cx);
-        self.close_dialog(window, cx);
+        dialog::close_id(window, cx, id);
         cx.emit(CreateBranchDialogEvent::Submit {
             branch_name,
             checkout_after_create: self.checkout_after_create,
@@ -317,6 +320,13 @@ pub fn open_create_branch_dialog(
                                 }
                             }),
                     )
+            }
+        })
+        .on_confirm({
+            let view = view.clone();
+            move |window, cx| {
+                view.update(cx, |view, cx| view.submit(window, cx));
+                false
             }
         })
         .on_close({

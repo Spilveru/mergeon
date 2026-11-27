@@ -5,7 +5,8 @@
 
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, SharedString, Subscription, Window, div, px, relative, rems,
+    App, Context, Entity, EventEmitter, Focusable as _, SharedString, Subscription, Window, div,
+    px, relative, rems,
 };
 use mergeon_backend::RemoteConnectionTest;
 use mergeon_ui::dialog::{self, AppDialog, DialogId, DialogWidth};
@@ -204,7 +205,7 @@ impl AddRemoteDialog {
     /// `handleSubmit`. El diálogo sigue abierto: lo cierra quien lo abrió
     /// cuando el remoto queda añadido.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.is_submittable(cx) || self.submitting {
+        if self.dialog_id.is_none() || !self.is_submittable(cx) || self.submitting {
             return;
         }
         cx.emit(AddRemoteDialogEvent::Submit {
@@ -389,6 +390,30 @@ impl AddRemoteDialog {
                                     move |_, _, cx| view.update(cx, |view, cx| view.submit(cx))
                                 }),
                         )
+                }
+            })
+            .on_confirm({
+                let view = view.clone();
+                move |window, cx| {
+                    // Los campos ya envían en `InputEvent::PressEnter`; evitar
+                    // enviarlo dos veces si `Enter` también burbujea `Confirm`.
+                    let input_focused = {
+                        let state = view.read(cx);
+                        state
+                            .remote_name
+                            .read(cx)
+                            .focus_handle(cx)
+                            .is_focused(window)
+                            || state
+                                .remote_url
+                                .read(cx)
+                                .focus_handle(cx)
+                                .is_focused(window)
+                    };
+                    if !input_focused {
+                        view.update(cx, |view, cx| view.submit(cx));
+                    }
+                    false
                 }
             })
             .on_close({

@@ -653,6 +653,197 @@ async fn dialog_select_enter_picks_option_without_confirming_or_closing(cx: &mut
 }
 
 #[gpui_kit::test]
+async fn dialog_select_enter_on_focused_trigger_opens_dropdown_without_confirming(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let current = Rc::new(RefCell::new(SharedString::from("origin")));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let current = current.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("Fetch")
+                .body({
+                    let current = current.clone();
+                    move |_, _| {
+                        let current = current.clone();
+                        let value = current.borrow().clone();
+                        mergeon_ui::select("dialog-remote")
+                            .items(["origin", "upstream", "fork"])
+                            .value(value)
+                            .on_change(move |value, window, _| {
+                                *current.borrow_mut() = value.clone();
+                                window.refresh();
+                            })
+                    }
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    true
+                })
+                .open(window, cx);
+        }
+    });
+
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "dialog-remote");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(confirms.get(), 0);
+    in_window(cx, window, |window, cx| {
+        assert!(window.try_find("popup-menu").is_some());
+        assert_eq!(dialog::open_count(window, cx), 1);
+    });
+}
+
+#[gpui_kit::test]
+async fn dialog_tabs_enter_switches_tab_without_confirming(cx: &mut TestAppContext) {
+    let window = open(cx, empty);
+    let confirms = Rc::new(Cell::new(0usize));
+    let active = Rc::new(RefCell::new(SharedString::from("changes")));
+
+    in_window(cx, window, {
+        let confirms = confirms.clone();
+        let active = active.clone();
+        move |window, cx| {
+            AppDialog::new()
+                .title("New worktree")
+                .body({
+                    let active = active.clone();
+                    move |_, _| {
+                        let active = active.clone();
+                        let selected = active.borrow().clone();
+                        mergeon_ui::tabs("dialog-tabs")
+                            .item(TabItem::new("changes", "Changes"))
+                            .item(TabItem::new("tree", "Repo tree"))
+                            .selected(selected)
+                            .on_change(move |key, window, _| {
+                                *active.borrow_mut() = key.clone();
+                                window.refresh();
+                            })
+                    }
+                })
+                .on_confirm(move |_, _| {
+                    confirms.set(confirms.get() + 1);
+                    true
+                })
+                .open(window, cx);
+        }
+    });
+
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "tab-tree");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(*active.borrow(), "tree");
+    assert_eq!(confirms.get(), 0);
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 1);
+    });
+}
+
+#[gpui_kit::test]
+async fn destructive_confirm_enter_on_focused_option_toggles_instead_of_confirming(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+    let outcome = Rc::new(Cell::new(None));
+
+    in_window(cx, window, {
+        let outcome = outcome.clone();
+        move |window, cx| {
+            dialog::confirm_with_option(
+                window,
+                cx,
+                ConfirmOptions {
+                    variant: ConfirmVariant::Destructive,
+                    ..confirm_options("Delete branch")
+                },
+                ConfirmOption {
+                    label: "Also delete on origin".into(),
+                    checked: false,
+                },
+                move |answer, _, _| outcome.set(Some(answer)),
+            );
+        }
+    });
+
+    in_window(cx, window, |window, cx| {
+        focus_by_tab(window, cx, "confirm-option");
+        window.press("enter", cx);
+    });
+
+    assert_eq!(outcome.get(), None);
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 1);
+    });
+
+    in_window(cx, window, |window, cx| window.click("confirm-accept", cx));
+    assert_eq!(
+        outcome.get(),
+        Some(ConfirmOutcome {
+            confirmed: true,
+            checked: true,
+        })
+    );
+}
+
+#[gpui_kit::test]
+async fn dialog_opened_from_context_menu_does_not_restore_focus_to_closed_menu(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::InteractiveElement as _;
+    use gpui_kit::TestSupportExt as _;
+
+    let window = open(cx, |_, _| {
+        div()
+            .id("branch-row")
+            .test_support()
+            .w(px(200.))
+            .h(px(32.))
+            .child("feature/login")
+            .context_menu_items(|_, _| {
+                vec![MenuItem::new("Delete branch").on_click(|window, cx| {
+                    AppDialog::new().title("Delete branch").open(window, cx);
+                })]
+            })
+            .into_any_element()
+    });
+
+    in_window(cx, window, |window, cx| {
+        window.right_click("branch-row", cx)
+    });
+    in_window(cx, window, |window, cx| {
+        assert_eq!(window.find("popup-menu").focused(), Some(true));
+        window.within("popup-menu").press("down", cx);
+        window.within("popup-menu").press("enter", cx);
+    });
+
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_titles(window, cx), ["Delete branch"]);
+        window.press("escape", cx);
+    });
+
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 0);
+        assert!(window.try_find("popup-menu").is_none());
+        assert!(
+            !window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("PopupMenu")),
+            "el foco no debe volver a un PopupMenu ya desmontado"
+        );
+        assert!(window.focused(cx).is_none());
+    });
+}
+
+#[gpui_kit::test]
 async fn reinit_after_clearing_key_bindings_preserves_button_enter_in_dialogs(
     cx: &mut TestAppContext,
 ) {
@@ -788,6 +979,113 @@ async fn dismissing_a_prompt_answers_nothing(cx: &mut TestAppContext) {
     in_window(cx, window, |window, cx| window.click("close", cx));
 
     assert_eq!(*answer.borrow(), Some(None));
+}
+
+#[gpui_kit::test]
+async fn single_line_prompt_clears_validation_error_on_edit(cx: &mut TestAppContext) {
+    let window = open(cx, empty);
+    let answer = open_prompt(
+        cx,
+        window,
+        PromptOptions {
+            default_value: "bad name".into(),
+            validate: Some(Rc::new(|value: &str| !value.contains(' '))),
+            input_error_message: "No spaces".into(),
+            ..Default::default()
+        },
+    );
+
+    in_window(cx, window, |window, cx| window.press("enter", cx));
+    assert_eq!(*answer.borrow(), None);
+    in_window(cx, window, |window, _| {
+        assert!(window.try_find("prompt-error").is_some());
+    });
+
+    in_window(cx, window, |window, cx| window.input("x", cx));
+    in_window(cx, window, |window, _| {
+        assert!(window.try_find("prompt-error").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn multiline_prompt_supports_secondary_enter_tab_escape_error_clearing_and_rows(
+    cx: &mut TestAppContext,
+) {
+    let window = open(cx, empty);
+
+    // Comprobar primero que `rows` cambia realmente el alto del área de texto.
+    let _ = open_prompt(
+        cx,
+        window,
+        PromptOptions {
+            textarea: true,
+            ..Default::default()
+        },
+    );
+    let default_height = in_window(cx, window, |window, _| {
+        window.find("prompt-textarea").bounds().size.height
+    });
+    in_window(cx, window, |window, cx| {
+        assert!(dialog::close(window, cx));
+    });
+
+    let answer = open_prompt(
+        cx,
+        window,
+        PromptOptions {
+            title: "Tag message".into(),
+            textarea: true,
+            rows: 8,
+            validate: Some(Rc::new(|value: &str| !value.trim().is_empty())),
+            input_error_message: "Message cannot be empty".into(),
+            ..Default::default()
+        },
+    );
+
+    let tall_height = in_window(cx, window, |window, _| {
+        window.find("prompt-textarea").bounds().size.height
+    });
+    assert!(
+        tall_height > default_height,
+        "rows: 8 ({tall_height:?}) debe medir más que el alto por defecto ({default_height:?})"
+    );
+
+    // `secondary-enter` con valor inválido muestra el error sin cerrar.
+    in_window(cx, window, |window, cx| window.press("secondary-enter", cx));
+    assert_eq!(*answer.borrow(), None);
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 1);
+        assert!(window.try_find("prompt-error").is_some());
+    });
+
+    // Editar limpia el error de validación.
+    in_window(cx, window, |window, cx| window.input("line1", cx));
+    in_window(cx, window, |window, _| {
+        assert!(window.try_find("prompt-error").is_none());
+    });
+
+    // Enter simple añade salto de línea y no confirma el diálogo.
+    in_window(cx, window, |window, cx| window.press("enter", cx));
+    assert_eq!(*answer.borrow(), None);
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 1);
+        window.input("line2", cx);
+    });
+
+    // Tab saca el foco del área de texto hacia Cancel sin insertar tabulación.
+    in_window(cx, window, |window, cx| {
+        window.press("tab", cx);
+        assert_eq!(window.find("prompt-cancel").focused(), Some(true));
+        window.press("shift-tab", cx);
+        assert_eq!(window.find("prompt-cancel").focused(), Some(false));
+    });
+
+    // `secondary-enter` (Ctrl+Enter / Cmd+Enter) confirma sin añadir `\n` extra.
+    in_window(cx, window, |window, cx| window.press("secondary-enter", cx));
+    assert_eq!(*answer.borrow(), Some(Some("line1\nline2".into())));
+    in_window(cx, window, |window, cx| {
+        assert_eq!(dialog::open_count(window, cx), 0);
+    });
 }
 
 // ---------------------------------------------------------------------------

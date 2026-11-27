@@ -357,6 +357,15 @@ impl CommitHistoryList {
         cx.notify();
     }
 
+    /// Trae a la vista la fila actualmente seleccionada aunque su hash no haya
+    /// cambiado (p. ej. al volver a elegir la misma rama o resultado de
+    /// búsqueda tras haberse desplazado por el historial).
+    pub fn scroll_selected_into_view(&mut self) {
+        if let Some(hash) = self.selected_commit_hash.clone() {
+            self.scroll_row_into_view(&hash);
+        }
+    }
+
     /// Los commits de la selección múltiple (por su [`row_key`]); vacío con
     /// selección simple. Se pintan seleccionados además del principal.
     pub fn set_multi_selection(&mut self, keys: Rc<HashSet<String>>, cx: &mut Context<Self>) {

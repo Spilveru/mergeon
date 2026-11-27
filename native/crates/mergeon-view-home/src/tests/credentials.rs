@@ -170,3 +170,63 @@ async fn warns_when_credentials_are_sent_over_plain_http(cx: &mut TestAppContext
     let (_dialog, _) = open(&app, request(None, false, false), cx);
     assert!(!app.exists(cx, "credentials-insecure-http"));
 }
+
+#[gpui_kit::test]
+async fn enter_in_username_moves_focus_to_password_without_showing_an_error(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::Focusable as _;
+
+    let app = TestApp::new(cx);
+    let (dialog, answers) = open(&app, request(None, false, false), cx);
+
+    // Submitting with empty username shows an error; editing username clears it.
+    app.click(cx, "credentials-sign-in");
+    assert_eq!(
+        app.label(cx, "credentials-error").as_deref(),
+        Some("Enter a username.")
+    );
+    app.in_window(cx, |window, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog
+                .username
+                .update(cx, |state, cx| state.focus(window, cx));
+        });
+        window.input("alice", cx);
+    });
+    app.settle(cx);
+    assert!(!app.exists(cx, "credentials-error"));
+
+    // Pressing Enter in username moves focus to password without flashing an error.
+    app.in_window(cx, |window, cx| window.press("enter", cx));
+    app.settle(cx);
+
+    assert!(!app.exists(cx, "credentials-error"));
+    assert!(answers.borrow().is_empty());
+    assert_eq!(app.dialog_titles(cx), ["Sign in to git.example.com"]);
+    let password_focused = app.in_window(cx, |window, cx| {
+        dialog
+            .read(cx)
+            .password
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    });
+    assert!(password_focused, "Enter in username should focus password");
+
+    // Typing the password and pressing Enter signs in cleanly.
+    app.in_window(cx, |window, cx| {
+        window.input("tok-123", cx);
+        window.press("enter", cx);
+    });
+    app.settle(cx);
+    assert_eq!(
+        *answers.borrow(),
+        [Some(CredentialsAnswer {
+            username: "alice".to_string(),
+            password: "tok-123".to_string(),
+            remember: false,
+        })]
+    );
+    assert!(app.dialog_titles(cx).is_empty());
+}

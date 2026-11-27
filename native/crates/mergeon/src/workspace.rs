@@ -13,8 +13,8 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, AnyView, ClickEvent, Context, Entity, FontWeight, MouseButton, ScrollHandle,
-    SharedString, Subscription, Window, div, px,
+    AnyElement, AnyView, ClickEvent, Context, Entity, FocusHandle, FontWeight, MouseButton,
+    ScrollHandle, SharedString, Subscription, Window, div, px,
 };
 use mergeon_app::AppModel;
 use mergeon_model::workspace_tabs::{
@@ -130,6 +130,11 @@ pub struct RepositoryWorkspaceView {
     file_tab_scroll: ScrollHandle,
     /// Pestaña activa (y cuántas había) que se trajo a la vista la última vez.
     scrolled_file_tab: Option<(String, usize)>,
+    /// Contenedor de foco del panel derecho para detectar foco huérfano al
+    /// cambiar de sección o pestaña de documento.
+    panel_focus: FocusHandle,
+    /// Última pestaña activa pintada, para soltar el foco al cambiar de vista.
+    rendered_tab: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -198,6 +203,8 @@ impl RepositoryWorkspaceView {
             files_open: true,
             file_tab_scroll: ScrollHandle::new(),
             scrolled_file_tab: None,
+            panel_focus: cx.focus_handle().tab_stop(false),
+            rendered_tab: None,
             _subscriptions: subscriptions,
         }
     }
@@ -912,6 +919,20 @@ impl Render for RepositoryWorkspaceView {
             return div().into_any_element();
         };
         let active_tab = workspace.active_tab.clone();
+        // Al cambiar de sección o pestaña de documento, soltar el foco si quedó
+        // dentro del panel que se desmonta (sin tocar el sidebar ni diálogos),
+        // para que la nueva vista pueda tomarlo sin quedar huérfano.
+        let tab_changed = self
+            .rendered_tab
+            .as_deref()
+            .is_some_and(|previous| previous != active_tab);
+        if tab_changed
+            && mergeon_ui::dialog::open_count(window, cx) == 0
+            && self.panel_focus.contains_focused(window, cx)
+        {
+            window.blur(cx);
+        }
+        self.rendered_tab = Some(active_tab.clone());
         // Las pestañas que ya no existen sueltan su panel.
         let open: Vec<String> = workspace.tabs.iter().map(|tab| tab.id.clone()).collect();
         self.file_panels.retain(|id, _| open.contains(id));
@@ -990,7 +1011,17 @@ impl Render for RepositoryWorkspaceView {
             .when(!workspace.tabs.is_empty(), |right| {
                 right.child(self.document_bar(&path, &workspace, window, cx))
             })
-            .child(panel);
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .track_focus(&self.panel_focus)
+                    .child(panel),
+            );
 
         div()
             .flex()

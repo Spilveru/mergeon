@@ -32,6 +32,7 @@
 //! [`operation_types`] y [`resizable_width`] no tienen archivo de origen
 //! propio: reúnen lo que compartían varios de los anteriores.
 
+pub mod branch_tree;
 pub mod collate;
 pub mod command_palette;
 pub mod fuzzy;

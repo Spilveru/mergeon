@@ -208,6 +208,9 @@ impl CommitsView {
         self.set_commit_rows(history.commits);
         self.history_repo_id = Some(repo_id.to_string());
         self.multi_commits_changed(cx);
+        if options.ensure_commit_visible {
+            self.scroll_selected_on_sync = true;
+        }
 
         let preferred_branch = options
             .preferred_branch

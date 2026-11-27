@@ -391,7 +391,10 @@ fn append(
             })
             .disabled(disabled);
             menu.item(match handler {
-                Some(handler) => row.on_click(move |_, window, cx| handler(window, cx)),
+                Some(handler) => row.on_click(move |_, window, cx| {
+                    let handler = handler.clone();
+                    window.defer(cx, move |window, cx| handler(window, cx));
+                }),
                 None => row,
             })
         }

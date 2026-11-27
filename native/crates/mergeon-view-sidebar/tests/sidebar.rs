@@ -2904,3 +2904,206 @@ async fn unrelated_model_notifications_do_not_repaint_the_sidebar(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(sidebar_renders(&h, cx).0, resized.0);
 }
+
+// ---------------------------------------------------------------------------
+// Subcarpetas de ramas
+// ---------------------------------------------------------------------------
+
+fn repo_with_nested_branches() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.git(&["branch", "feature/login"]);
+    repo.git(&["branch", "feature/auth/oauth"]);
+    repo.git(&["branch", "fix/bug"]);
+    repo
+}
+
+#[gpui_kit::test]
+async fn groups_local_branches_into_collapsible_folders(cx: &mut TestAppContext) {
+    let repo = repo_with_nested_branches();
+    let h = Harness::open(&repo, cx).await;
+
+    // Todas las carpetas arrancan desplegadas con sus ramas visibles.
+    assert!(h.exists(cx, "branch:main"));
+    assert!(h.exists(cx, "branch-folder:feature"));
+    assert!(h.exists(cx, "branch-folder:feature/auth"));
+    assert!(h.exists(cx, "branch-folder:fix"));
+    assert!(h.exists(cx, "branch:feature/login"));
+    assert!(h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(h.exists(cx, "branch:fix/bug"));
+
+    h.in_window(cx, |window, _| {
+        assert_eq!(
+            window.find("branch-folder:feature").label(),
+            Some("feature (2)")
+        );
+        assert_eq!(
+            window.find("branch-folder:feature/auth").label(),
+            Some("auth (1)")
+        );
+        assert_eq!(window.find("branch-folder:fix").label(), Some("fix (1)"));
+    });
+
+    // Destacar una rama anidada sigue mostrándola plana en Starred.
+    h.click(cx, "star:feature/login");
+    h.wait_repo(cx, "the starred nested branch", |repository| {
+        repository.starred_branches == ["feature/login"]
+    });
+    assert!(h.exists(cx, "starred:feature/login"));
+
+    // Plegar `feature` oculta sus hijos y subcarpetas, sin tocar `main` ni `fix`.
+    h.click(cx, "branch-folder:feature");
+    assert!(h.exists(cx, "branch-folder:feature"));
+    assert!(!h.exists(cx, "branch:feature/login"));
+    assert!(!h.exists(cx, "branch-folder:feature/auth"));
+    assert!(!h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(h.exists(cx, "branch:main"));
+    assert!(h.exists(cx, "branch-folder:fix"));
+    assert!(h.exists(cx, "branch:fix/bug"));
+
+    // Volver a pulsar la carpeta la despliega de nuevo.
+    h.click(cx, "branch-folder:feature");
+    assert!(h.exists(cx, "branch:feature/login"));
+    assert!(h.exists(cx, "branch-folder:feature/auth"));
+    assert!(h.exists(cx, "branch:feature/auth/oauth"));
+}
+
+#[gpui_kit::test]
+async fn branch_filter_auto_expands_collapsed_folders_with_matches(cx: &mut TestAppContext) {
+    let repo = repo_with_nested_branches();
+    let h = Harness::open(&repo, cx).await;
+
+    h.click(cx, "branch-folder:feature");
+    assert!(!h.exists(cx, "branch:feature/auth/oauth"));
+
+    h.click(cx, "sidebar-filter");
+    h.in_window(cx, |window, cx| window.input("oauth", cx));
+
+    assert!(h.exists(cx, "branch-folder:feature"));
+    assert!(h.exists(cx, "branch-folder:feature/auth"));
+    assert!(h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(!h.exists(cx, "branch:feature/login"));
+    assert!(!h.exists(cx, "branch:main"));
+    assert!(!h.exists(cx, "branch-folder:fix"));
+
+    // Al vaciar el filtro se respeta de nuevo el estado plegado de `feature`.
+    h.in_window(cx, |window, cx| window.press("escape", cx));
+    assert!(h.exists(cx, "branch-folder:feature"));
+    assert!(!h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(h.exists(cx, "branch:main"));
+}
+
+#[gpui_kit::test]
+async fn checking_out_a_branch_inside_a_collapsed_folder_reveals_it(cx: &mut TestAppContext) {
+    let repo = repo_with_nested_branches();
+    let h = Harness::open(&repo, cx).await;
+
+    h.click(cx, "branch-folder:feature/auth");
+    h.click(cx, "branch-folder:feature");
+    assert!(!h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(!h.exists(cx, "branch-folder-active:feature"));
+
+    h.in_window(cx, |window, cx| {
+        h.sidebar.update(cx, |sidebar, cx| {
+            sidebar.run_command(
+                SidebarCommand::CheckoutBranch("feature/auth/oauth".to_string()),
+                window,
+                cx,
+            );
+        });
+    });
+    h.wait_repo(cx, "checkout nested branch", |repository| {
+        repository.current_branch.as_deref() == Some("feature/auth/oauth")
+    });
+    h.settle(cx);
+
+    assert!(h.exists(cx, "branch-folder:feature"));
+    assert!(h.exists(cx, "branch-folder:feature/auth"));
+    assert!(h.exists(cx, "branch:feature/auth/oauth"));
+
+    // Plegar manualmente la carpeta con HEAD dentro muestra el punto activo.
+    h.click(cx, "branch-folder:feature");
+    assert!(!h.exists(cx, "branch:feature/auth/oauth"));
+    assert!(h.exists(cx, "branch-folder-active:feature"));
+}
+
+#[gpui_kit::test]
+async fn groups_remote_branches_into_collapsible_folders_and_preserves_actions(
+    cx: &mut TestAppContext,
+) {
+    let repo = TestRepo::new();
+    let origin = repo.publish_to_origin();
+    repo.publish_remote_only_branch("feature/remote-a");
+    repo.publish_remote_only_branch("feature/remote-b");
+    let h = Harness::open_with(&repo, sections(&["starred", "branches", "remotes"]), cx).await;
+
+    assert!(h.exists(cx, "remote:origin"));
+    assert!(h.exists(cx, "remote-branch:origin/main"));
+    assert!(h.exists(cx, "remote-branch-folder:origin/feature"));
+    assert!(h.exists(cx, "remote-branch:origin/feature/remote-a"));
+    assert!(h.exists(cx, "remote-branch:origin/feature/remote-b"));
+
+    h.in_window(cx, |window, _| {
+        assert_eq!(
+            window.find("remote-branch-folder:origin/feature").label(),
+            Some("feature (2)")
+        );
+    });
+
+    // Plegar y desplegar la carpeta del remoto.
+    h.click(cx, "remote-branch-folder:origin/feature");
+    assert!(h.exists(cx, "remote-branch-folder:origin/feature"));
+    assert!(!h.exists(cx, "remote-branch:origin/feature/remote-a"));
+    assert!(!h.exists(cx, "remote-branch:origin/feature/remote-b"));
+    assert!(h.exists(cx, "remote-branch:origin/main"));
+
+    h.click(cx, "remote-branch-folder:origin/feature");
+    assert!(h.exists(cx, "remote-branch:origin/feature/remote-a"));
+    assert!(h.exists(cx, "remote-branch:origin/feature/remote-b"));
+
+    // El doble clic sobre una rama remota anidada conserva el nombre completo.
+    h.double_click(cx, "remote-branch:origin/feature/remote-a");
+    h.wait_ui(cx, "the tracking dialog", |window, cx| {
+        mergeon_ui::dialog::open_count(window, cx) == 1
+    });
+    let remote_branch = h.sidebar.read_with(cx, |sidebar, cx| {
+        sidebar
+            .checkout_dialog()
+            .expect("checkout dialog")
+            .read(cx)
+            .options()
+            .remote_branch
+            .to_string()
+    });
+    assert_eq!(remote_branch, "origin/feature/remote-a");
+    h.click(cx, "checkout-submit");
+    h.wait_repo(cx, "the nested remote checkout", |repository| {
+        repository.current_branch.as_deref() == Some("feature/remote-a")
+    });
+    h.settle(cx);
+    assert_eq!(repo.current_branch(), "feature/remote-a");
+
+    // El menú contextual también usa el nombre completo de la rama remota.
+    h.host.answer_confirm(true);
+    let entries = h.sidebar.read_with(cx, |sidebar, cx| {
+        sidebar.remote_branch_menu("origin", "feature/remote-b", cx)
+    });
+    h.choose_menu_entry(
+        cx,
+        "remote-branch:origin/feature/remote-b",
+        &entries,
+        "Delete 'origin/feature/remote-b'...",
+    );
+    h.wait_repo(cx, "the nested remote branch to go", |repository| {
+        repository.remotes.first().is_some_and(|remote| {
+            !remote
+                .branches
+                .iter()
+                .any(|branch| branch == "feature/remote-b")
+        })
+    });
+    h.settle(cx);
+    assert!(
+        !support::git_in(&origin, &["branch", "--format=%(refname:short)"])
+            .contains("feature/remote-b")
+    );
+}

@@ -128,6 +128,28 @@ async fn follows_the_section_the_app_asks_for(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn repeated_open_settings_routes_back_to_the_same_initial_section(cx: &mut TestAppContext) {
+    let (app, _updater, view) = settings("appearance", cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.section(), SettingsSection::Appearance)
+    });
+
+    app.click(cx, "git");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.section(), SettingsSection::Git)
+    });
+
+    // Re-opening the original initial section routes back to it even though
+    // `settings_section()` still holds `"appearance"`.
+    app.model
+        .update(cx, |model, cx| model.open_settings("appearance", cx));
+    app.settle(cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.section(), SettingsSection::Appearance)
+    });
+}
+
+#[gpui_kit::test]
 async fn back_asks_the_shell_to_leave_settings(cx: &mut TestAppContext) {
     let (app, _updater, view) = settings("appearance", cx);
     let events = Rc::new(RefCell::new(Vec::new()));

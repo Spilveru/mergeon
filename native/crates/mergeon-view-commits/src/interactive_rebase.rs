@@ -108,6 +108,11 @@ pub fn available_actions(index: usize) -> Vec<RebaseAction> {
         .collect()
 }
 
+fn has_kept_predecessor(rows: &[RebaseRow], index: usize) -> bool {
+    rows.get(..index)
+        .is_some_and(|before| before.iter().any(|row| row.action != RebaseAction::Drop))
+}
+
 /// Texto de la descripción del diálogo.
 pub fn rebase_description(commit_count: usize) -> String {
     format!(
@@ -165,6 +170,31 @@ impl InteractiveRebaseDialog {
         }
     }
 
+    /// Acciones válidas para la fila `index` dado el estado actual: `squash` y
+    /// `fixup` requieren un commit anterior que no esté en `drop`.
+    pub fn available_actions_for(&self, index: usize) -> Vec<RebaseAction> {
+        let can_meld = has_kept_predecessor(&self.rows, index);
+        RebaseAction::ALL
+            .into_iter()
+            .filter(|action| can_meld || !action.melds_into_previous())
+            .collect()
+    }
+
+    /// Ninguna fila puede quedar en `squash`/`fixup` sin un commit anterior
+    /// que se conserve (no `drop`). La primera fila mantenida que quede
+    /// huérfana pasa a `pick`, y a partir de ella las siguientes ya tienen
+    /// predecesor.
+    fn promote_orphaned_melds(&mut self) {
+        if let Some(first_kept) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.action != RebaseAction::Drop)
+            && first_kept.action.melds_into_previous()
+        {
+            first_kept.action = RebaseAction::Pick;
+        }
+    }
+
     /// `moveRow(index, delta)`.
     pub fn move_row(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
         let Some(target) = index.checked_add_signed(delta) else {
@@ -174,10 +204,7 @@ impl InteractiveRebaseDialog {
             return;
         }
         self.rows.swap(index, target);
-        // La primera fila no puede quedar en squash/fixup tras el reorden.
-        if self.rows[0].action.melds_into_previous() {
-            self.rows[0].action = RebaseAction::Pick;
-        }
+        self.promote_orphaned_melds();
         cx.notify();
     }
 
@@ -189,13 +216,14 @@ impl InteractiveRebaseDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(row) = self.rows.get_mut(index) else {
-            return;
-        };
-        if !available_actions(index).contains(&action) || row.action == action {
+        if index >= self.rows.len()
+            || !self.available_actions_for(index).contains(&action)
+            || self.rows[index].action == action
+        {
             return;
         }
-        row.action = action;
+        self.rows[index].action = action;
+        self.promote_orphaned_melds();
         if action == RebaseAction::Reword {
             self.ensure_input(index, window, cx);
         }
@@ -238,13 +266,13 @@ impl InteractiveRebaseDialog {
             .join(" · ")
     }
 
-    /// `canSubmit`: hay filas, la primera no se funde con nada y queda al menos
-    /// un commit sin descartar.
+    /// `canSubmit`: queda al menos un commit sin descartar y el primero que se
+    /// conserva no intenta fundirse con uno anterior.
     pub fn can_submit(&self) -> bool {
         self.rows
-            .first()
-            .is_some_and(|row| !row.action.melds_into_previous())
-            && self.rows.iter().any(|row| row.action != RebaseAction::Drop)
+            .iter()
+            .find(|row| row.action != RebaseAction::Drop)
+            .is_some_and(|first_kept| !first_kept.action.melds_into_previous())
     }
 
     /// El todo que se entregaría ahora mismo.
@@ -378,8 +406,12 @@ impl InteractiveRebaseDialog {
             select.into_any_element()
         } else {
             select
-                .dropdown_menu_items(move |_, _| {
-                    available_actions(index)
+                .dropdown_menu_items(move |_, cx| {
+                    let actions = view
+                        .upgrade()
+                        .map(|dialog| dialog.read(cx).available_actions_for(index))
+                        .unwrap_or_else(|| available_actions(index));
+                    actions
                         .into_iter()
                         .map(|action| {
                             let view = view.clone();
@@ -724,5 +756,51 @@ mod tests {
     fn parses_action_names() {
         assert_eq!(RebaseAction::parse("fixup"), Some(RebaseAction::Fixup));
         assert_eq!(RebaseAction::parse("edit"), None);
+    }
+
+    #[test]
+    fn cannot_submit_when_first_non_drop_row_is_squash_or_fixup() {
+        let commits = vec![
+            RebaseCommit::new("a".repeat(40), "first"),
+            RebaseCommit::new("b".repeat(40), "second"),
+        ];
+        let mut dialog = InteractiveRebaseDialog::new(&commits);
+        dialog.rows[0].action = RebaseAction::Drop;
+        dialog.rows[1].action = RebaseAction::Squash;
+        assert!(!dialog.can_submit());
+
+        dialog.rows[1].action = RebaseAction::Fixup;
+        assert!(!dialog.can_submit());
+
+        dialog.rows[1].action = RebaseAction::Pick;
+        assert!(dialog.can_submit());
+    }
+
+    #[test]
+    fn dropping_row_zero_promotes_row_one_from_squash_to_pick_and_restricts_actions() {
+        let commits = vec![
+            RebaseCommit::new("a".repeat(40), "first"),
+            RebaseCommit::new("b".repeat(40), "second"),
+            RebaseCommit::new("c".repeat(40), "third"),
+        ];
+        let mut dialog = InteractiveRebaseDialog::new(&commits);
+        dialog.rows[1].action = RebaseAction::Squash;
+        dialog.rows[2].action = RebaseAction::Fixup;
+
+        dialog.rows[0].action = RebaseAction::Drop;
+        dialog.promote_orphaned_melds();
+
+        assert_eq!(dialog.rows[0].action, RebaseAction::Drop);
+        assert_eq!(dialog.rows[1].action, RebaseAction::Pick);
+        assert_eq!(dialog.rows[2].action, RebaseAction::Fixup);
+        assert!(dialog.can_submit());
+
+        // Row 1 has no kept predecessor, so squash/fixup are disallowed there;
+        // row 2 still has row 1 (pick) before it, so all 5 actions stay valid.
+        assert_eq!(
+            dialog.available_actions_for(1),
+            [RebaseAction::Pick, RebaseAction::Reword, RebaseAction::Drop]
+        );
+        assert_eq!(dialog.available_actions_for(2), RebaseAction::ALL);
     }
 }

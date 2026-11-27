@@ -13,6 +13,7 @@ use gpui_kit::{
 };
 use mergeon_backend::Submodule;
 use mergeon_git_query::SubmoduleState;
+use mergeon_model::branch_tree::BranchTreeRow;
 use mergeon_ui::menu::{MenuItem, MenuTriggerExt as _};
 use mergeon_ui::theme::with_alpha;
 use mergeon_ui::{ActivePaletteExt as _, AppIcon, IconTone, Lucide, MergeonStyled as _, Radius};
@@ -32,7 +33,10 @@ const STAR_FILLED_SVG: &[u8] = include_bytes!("../assets/star-filled.svg");
 
 /// La rama que se arrastra sobre otra para abrir Branch Actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DraggedBranch(pub String);
+pub(crate) struct DraggedBranch {
+    pub repo_id: String,
+    pub name: String,
+}
 
 /// Lo que acompaña al cursor mientras se arrastra una rama (la
 /// `custom-drag-image` del original).
@@ -59,6 +63,18 @@ impl Render for BranchDragPreview {
             .shadow(mergeon_ui::style::floating_shadow(cx))
             .child(self.name.clone())
     }
+}
+
+const BRANCH_BASE_INDENT_REMS: f32 = 1.25;
+const REMOTE_BRANCH_BASE_INDENT_REMS: f32 = 2.6;
+const FOLDER_DEPTH_INDENT_REMS: f32 = 0.85;
+
+fn branch_indent_rems(depth: usize) -> f32 {
+    BRANCH_BASE_INDENT_REMS + FOLDER_DEPTH_INDENT_REMS * depth as f32
+}
+
+fn remote_branch_indent_rems(depth: usize) -> f32 {
+    REMOTE_BRANCH_BASE_INDENT_REMS + FOLDER_DEPTH_INDENT_REMS * depth as f32
 }
 
 fn row_id(kind: &str, key: &str) -> SharedString {
@@ -171,12 +187,14 @@ impl Sidebar {
         id: SharedString,
         active: bool,
         exists: bool,
+        indent_rems: f32,
+        tooltip_text: Option<String>,
         cx: &App,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let palette = cx.palette();
         section::item(id, cx)
             .pr(rems(0.65))
-            .pl(rems(1.25))
+            .pl(rems(indent_rems))
             .when(exists, |row| row.cursor_pointer())
             // Señal: la rama actual no se rellena; la marcan el cuadrado
             // naranja y el peso (ver `branch_name`).
@@ -185,9 +203,9 @@ impl Sidebar {
             })
             .when(active, |row| row.text_color(palette.sidebar_foreground))
             .when(self.row_tooltips && exists, |row| {
-                row.tooltip(mergeon_ui::tooltip(
-                    "Click to view · Double-click to checkout",
-                ))
+                let text = tooltip_text
+                    .unwrap_or_else(|| "Click to view · Double-click to checkout".to_string());
+                row.tooltip(mergeon_ui::tooltip(text))
             })
     }
 
@@ -246,11 +264,18 @@ impl Sidebar {
         let has_menu = snapshot.data.starred_exists[index];
 
         let row = self
-            .branch_row(row_id("starred", branch_name), active, has_menu, cx)
+            .branch_row(
+                row_id("starred", branch_name),
+                active,
+                has_menu,
+                BRANCH_BASE_INDENT_REMS,
+                None,
+                cx,
+            )
             .group(group.clone())
             .map(|row| {
                 if viewing {
-                    section::viewing(row, 1.25, cx)
+                    section::viewing(row, BRANCH_BASE_INDENT_REMS, cx)
                 } else {
                     row
                 }
@@ -294,33 +319,103 @@ impl Sidebar {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_branch_folder_row(
+        &self,
+        path: &str,
+        label: &str,
+        branch_count: usize,
+        contains_active: bool,
+        depth: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = *cx.palette();
+        let indent = branch_indent_rems(depth);
+        let folder_path = path.to_string();
+        let folder_icon = if expanded {
+            Lucide::FolderOpen
+        } else {
+            Lucide::Folder
+        };
+
+        section::item(row_id("branch-folder", path), cx)
+            .pr(rems(0.65))
+            .pl(rems(indent))
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.sidebar_row_hover))
+            .when(self.row_tooltips && path != label, |row| {
+                row.tooltip(mergeon_ui::tooltip(path.to_string()))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_branch_folder(&folder_path, cx);
+            }))
+            .child(section::chevron(expanded))
+            .child(section::item_icon(folder_icon, IconTone::Muted))
+            .child(section::item_name(label.to_string()))
+            .when(!expanded && contains_active, |row| {
+                row.child(
+                    div()
+                        .id(row_id("branch-folder-active", path))
+                        .flex_shrink_0()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(palette.primary)
+                        .test_support(),
+                )
+            })
+            .child(section::count(branch_count, cx))
+            .test_support()
+            .aria_expanded(expanded)
+            .aria_label(format!("{label} ({branch_count})"))
+            .into_any_element()
+    }
+
     fn render_branch_row(
         &self,
         snapshot: &RepoSnapshot,
         index: usize,
+        label: &str,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = *cx.palette();
         let branch = &snapshot.data.branches[index];
         let is_starred = snapshot.data.branch_starred[index];
         let name = branch.name.clone();
+        let repo_id = snapshot.data.repo_id.clone();
         let viewing = snapshot.viewed_ref.as_deref() == Some(name.as_str());
         let dragged = self.dragged_branch.as_deref() == Some(name.as_str());
+        let indent = branch_indent_rems(depth);
+        let tooltip =
+            (depth > 0).then(|| format!("{name} · Click to view · Double-click to checkout"));
         let sidebar = cx.entity().downgrade();
 
-        self.branch_row(row_id("branch", &name), branch.active, true, cx)
-            .map(|row| {
-                if viewing {
-                    section::viewing(row, 1.25, cx)
-                } else {
-                    row
-                }
-            })
-            .when(branch.is_remote, |row| row.opacity(0.7))
-            .when(dragged, |row| row.opacity(0.5))
-            .on_click(Self::branch_click_listener(&name, cx))
-            .on_drag(DraggedBranch(name.clone()), move |dragged, _, _, cx| {
-                let name = dragged.0.clone();
+        self.branch_row(
+            row_id("branch", &name),
+            branch.active,
+            true,
+            indent,
+            tooltip,
+            cx,
+        )
+        .map(|row| {
+            if viewing {
+                section::viewing(row, indent, cx)
+            } else {
+                row
+            }
+        })
+        .when(branch.is_remote, |row| row.opacity(0.7))
+        .when(dragged, |row| row.opacity(0.5))
+        .on_click(Self::branch_click_listener(&name, cx))
+        .on_drag(
+            DraggedBranch {
+                repo_id: repo_id.clone(),
+                name: name.clone(),
+            },
+            move |dragged, _, _, cx| {
+                let name = dragged.name.clone();
                 sidebar
                     .update(cx, |this, cx| {
                         this.dragged_branch = Some(name.clone());
@@ -328,136 +423,146 @@ impl Sidebar {
                     })
                     .ok();
                 cx.new(|_| BranchDragPreview { name: name.into() })
-            })
-            .drag_over::<DraggedBranch>({
-                let name = name.clone();
-                move |style, dragged, _, _| {
-                    if dragged.0 == name {
-                        return style;
-                    }
-                    // `outline: 1px dashed var(--primary); outline-offset: -2px`:
-                    // un borde, con el relleno 1px más corto para no mover la fila.
-                    style
-                        .border_1()
-                        .border_dashed()
-                        .border_color(palette.primary)
-                        .pt(rems(0.2 - 0.0625))
-                        .pb(rems(0.2 - 0.0625))
-                        .pr(rems(0.65 - 0.0625))
-                        .pl(rems(1.25 - 0.0625))
+            },
+        )
+        .drag_over::<DraggedBranch>({
+            let name = name.clone();
+            let repo_id = repo_id.clone();
+            move |style, dragged, _, _| {
+                if dragged.repo_id != repo_id || dragged.name == name {
+                    return style;
                 }
-            })
-            .on_drop(cx.listener({
-                let name = name.clone();
-                move |this, dragged: &DraggedBranch, window, cx| {
-                    this.drop_branch(&dragged.0, &name, window, cx);
+                // `outline: 1px dashed var(--primary); outline-offset: -2px`:
+                // un borde, con el relleno 1px más corto para no mover la fila.
+                style
+                    .border_1()
+                    .border_dashed()
+                    .border_color(palette.primary)
+                    .pt(rems(0.2 - 0.0625))
+                    .pb(rems(0.2 - 0.0625))
+                    .pr(rems(0.65 - 0.0625))
+                    .pl(rems(indent - 0.0625))
+            }
+        })
+        .on_drop(cx.listener({
+            let name = name.clone();
+            move |this, dragged: &DraggedBranch, window, cx| {
+                if this
+                    .active_repo(cx)
+                    .is_some_and(|repo| repo.id == dragged.repo_id)
+                {
+                    this.drop_branch(&dragged.name, &name, window, cx);
+                } else {
+                    this.dragged_branch = None;
+                    cx.notify();
                 }
-            }))
-            .child(if branch.active {
-                section::head_mark(cx).into_any_element()
-            } else {
-                section::item_icon(Lucide::GitBranch, IconTone::Muted).into_any_element()
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap(rems(0.35))
-                    .child(Self::branch_name(&name, branch.active))
-                    .when(branch.has_tracking, |this| {
-                        this.child(
-                            mergeon_ui::icon(Lucide::Cloud)
-                                .size(px(12.))
-                                .tone(IconTone::Active)
-                                .opacity(0.8),
-                        )
-                    })
-                    // Desprotegida en otro worktree (no se puede hacer checkout aquí).
-                    .when_some(self.branch_worktree(&name), |this, path| {
-                        this.child(
-                            div()
-                                .id(row_id("branch-worktree", &name))
-                                .test_support()
-                                .flex()
-                                .flex_shrink_0()
-                                .child(
-                                    mergeon_ui::icon(Lucide::FolderGit2)
-                                        .size(px(12.))
-                                        .tone(IconTone::Muted),
-                                )
-                                .tooltip(mergeon_ui::tooltip(format!(
-                                    "Checked out in the worktree at {path}"
-                                ))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .ml_auto()
-                    .gap(rems(0.3))
-                    .when(branch.ahead > 0, |this| {
-                        this.child(
-                            div()
-                                .id(row_id("ahead", &name))
-                                .text_size(rems(0.6875))
-                                .font_weight(FontWeight::MEDIUM)
-                                .px(rems(0.24))
-                                .py(rems(0.05))
-                                .rounded(Radius::Sm.px(cx))
-                                .bg(with_alpha(palette.success, 0.12))
-                                .text_color(palette.success)
-                                .tooltip(mergeon_ui::tooltip(format!(
-                                    "{} commits ahead",
-                                    branch.ahead
-                                )))
-                                .child(format!("↑{}", branch.ahead)),
-                        )
-                    })
-                    .when(branch.behind > 0, |this| {
-                        this.child(
-                            div()
-                                .id(row_id("behind", &name))
-                                .text_size(rems(0.6875))
-                                .font_weight(FontWeight::MEDIUM)
-                                .px(rems(0.24))
-                                .py(rems(0.05))
-                                .rounded(Radius::Sm.px(cx))
-                                .bg(with_alpha(palette.warning, 0.14))
-                                .text_color(palette.warning)
-                                .tooltip(mergeon_ui::tooltip(format!(
-                                    "{} commits behind",
-                                    branch.behind
-                                )))
-                                .child(format!("↓{}", branch.behind)),
-                        )
-                    })
-                    .child(Self::star_button(
-                        row_id("star", &name),
-                        &name,
-                        is_starred,
-                        if is_starred {
-                            "Unstar branch"
-                        } else {
-                            "Star branch"
-                        },
-                        cx,
-                    ))
-                    .when(branch.active, |this| {
-                        this.child(
-                            mergeon_ui::icon(Lucide::Check)
-                                .size(px(12.))
-                                .tone(IconTone::Active),
-                        )
-                    }),
-            )
-            .test_support()
-            .context_menu_items(Self::local_branch_context_menu(&name, cx))
-            .into_any_element()
+            }
+        }))
+        .child(if branch.active {
+            section::head_mark(cx).into_any_element()
+        } else {
+            section::item_icon(Lucide::GitBranch, IconTone::Muted).into_any_element()
+        })
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(rems(0.35))
+                .child(Self::branch_name(label, branch.active))
+                .when(branch.has_tracking, |this| {
+                    this.child(
+                        mergeon_ui::icon(Lucide::Cloud)
+                            .size(px(12.))
+                            .tone(IconTone::Active)
+                            .opacity(0.8),
+                    )
+                })
+                // Desprotegida en otro worktree (no se puede hacer checkout aquí).
+                .when_some(self.branch_worktree(&name), |this, path| {
+                    this.child(
+                        div()
+                            .id(row_id("branch-worktree", &name))
+                            .test_support()
+                            .flex()
+                            .flex_shrink_0()
+                            .child(
+                                mergeon_ui::icon(Lucide::FolderGit2)
+                                    .size(px(12.))
+                                    .tone(IconTone::Muted),
+                            )
+                            .tooltip(mergeon_ui::tooltip(format!(
+                                "Checked out in the worktree at {path}"
+                            ))),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .ml_auto()
+                .gap(rems(0.3))
+                .when(branch.ahead > 0, |this| {
+                    this.child(
+                        div()
+                            .id(row_id("ahead", &name))
+                            .text_size(rems(0.6875))
+                            .font_weight(FontWeight::MEDIUM)
+                            .px(rems(0.24))
+                            .py(rems(0.05))
+                            .rounded(Radius::Sm.px(cx))
+                            .bg(with_alpha(palette.success, 0.12))
+                            .text_color(palette.success)
+                            .tooltip(mergeon_ui::tooltip(format!(
+                                "{} commits ahead",
+                                branch.ahead
+                            )))
+                            .child(format!("↑{}", branch.ahead)),
+                    )
+                })
+                .when(branch.behind > 0, |this| {
+                    this.child(
+                        div()
+                            .id(row_id("behind", &name))
+                            .text_size(rems(0.6875))
+                            .font_weight(FontWeight::MEDIUM)
+                            .px(rems(0.24))
+                            .py(rems(0.05))
+                            .rounded(Radius::Sm.px(cx))
+                            .bg(with_alpha(palette.warning, 0.14))
+                            .text_color(palette.warning)
+                            .tooltip(mergeon_ui::tooltip(format!(
+                                "{} commits behind",
+                                branch.behind
+                            )))
+                            .child(format!("↓{}", branch.behind)),
+                    )
+                })
+                .child(Self::star_button(
+                    row_id("star", &name),
+                    &name,
+                    is_starred,
+                    if is_starred {
+                        "Unstar branch"
+                    } else {
+                        "Star branch"
+                    },
+                    cx,
+                ))
+                .when(branch.active, |this| {
+                    this.child(
+                        mergeon_ui::icon(Lucide::Check)
+                            .size(px(12.))
+                            .tone(IconTone::Active),
+                    )
+                }),
+        )
+        .test_support()
+        .context_menu_items(Self::local_branch_context_menu(&name, cx))
+        .into_any_element()
     }
 
     /// Un tramo de filas virtuales de una sección: solo se construyen las que
@@ -494,10 +599,32 @@ impl Sidebar {
         snapshot: &RepoSnapshot,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let filtered = snapshot.filtered_branches.clone();
-        filtered[range]
+        let rows = snapshot.branch_rows.clone();
+        rows[range]
             .iter()
-            .map(|index| self.render_branch_row(snapshot, *index, cx))
+            .map(|row| match row {
+                BranchTreeRow::Folder {
+                    path,
+                    label,
+                    branch_count,
+                    contains_active,
+                    depth,
+                    expanded,
+                } => self.render_branch_folder_row(
+                    path,
+                    label,
+                    *branch_count,
+                    *contains_active,
+                    *depth,
+                    *expanded,
+                    cx,
+                ),
+                BranchTreeRow::Branch {
+                    label,
+                    depth,
+                    item: index,
+                } => self.render_branch_row(snapshot, *index, label, *depth, cx),
+            })
             .collect()
     }
 
@@ -638,7 +765,7 @@ impl Sidebar {
                         .when(branch_count > 0, |content| {
                             content.child(Self::section_rows(
                                 "branch-rows",
-                                RowHeights::uniform(branch_count, row_height),
+                                RowHeights::uniform(snapshot.branch_rows.len(), row_height),
                                 snapshot,
                                 Self::branch_rows,
                                 cx,
@@ -683,12 +810,58 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// Una rama de un remoto, sangrada bajo él.
+    /// Collapsible folder row for remote branches.
+    #[allow(clippy::too_many_arguments)]
+    fn render_remote_branch_folder_row(
+        &self,
+        snapshot: &RepoSnapshot,
+        remote: usize,
+        path: &str,
+        label: &str,
+        branch_count: usize,
+        depth: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = *cx.palette();
+        let remote_name = snapshot.data.remotes[remote].name.clone();
+        let full_key = format!("{remote_name}/{path}");
+        let indent = remote_branch_indent_rems(depth);
+        let folder_path = path.to_string();
+        let folder_icon = if expanded {
+            Lucide::FolderOpen
+        } else {
+            Lucide::Folder
+        };
+
+        section::item(row_id("remote-branch-folder", &full_key), cx)
+            .pl(rems(indent))
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.sidebar_row_hover))
+            .when(self.row_tooltips && path != label, |row| {
+                row.tooltip(mergeon_ui::tooltip(full_key.clone()))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_remote_branch_folder(&remote_name, &folder_path, cx);
+            }))
+            .child(section::chevron(expanded))
+            .child(section::item_icon(folder_icon, IconTone::Muted))
+            .child(section::item_name(label.to_string()))
+            .child(section::count(branch_count, cx))
+            .test_support()
+            .aria_expanded(expanded)
+            .aria_label(format!("{label} ({branch_count})"))
+            .into_any_element()
+    }
+
+    /// Una rama de un remoto, sangrada bajo él (y bajo sus carpetas, si las hay).
     fn render_remote_branch_row(
         &self,
         snapshot: &RepoSnapshot,
         remote: usize,
         index: usize,
+        label: &str,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = *cx.palette();
@@ -697,15 +870,16 @@ impl Sidebar {
         let branch = &snapshot.data.remotes[remote].branches[index];
         let full_name = format!("{remote_name}/{branch}");
         let viewing = snapshot.viewed_ref.as_deref() == Some(full_name.as_str());
+        let indent = remote_branch_indent_rems(depth);
         // Sangrada bajo su remoto con su propio relleno: el resaltado (hover,
         // "viendo") llega de borde a borde como en las demás filas.
         let row = section::item(row_id("remote-branch", &full_name), cx)
-            .pl(rems(2.6))
+            .pl(rems(indent))
             .cursor_pointer()
             .hover(|style| style.bg(palette.sidebar_row_hover))
             .map(|row| {
                 if viewing {
-                    section::viewing(row, 2.6, cx)
+                    section::viewing(row, indent, cx)
                 } else {
                     row
                 }
@@ -732,7 +906,7 @@ impl Sidebar {
                 }
             }))
             .child(section::item_icon(Lucide::GitBranch, IconTone::Muted))
-            .child(section::item_name(branch.clone()))
+            .child(section::item_name(label.to_string()))
             .test_support()
             .context_menu_items({
                 let sidebar = weak.clone();
@@ -759,13 +933,33 @@ impl Sidebar {
         snapshot: &RepoSnapshot,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        snapshot.data.remote_rows[range]
+        snapshot.remote_rows[range]
             .iter()
-            .map(|row| match *row {
-                RemoteRow::Remote(remote) => self.render_remote_row(snapshot, remote, cx),
-                RemoteRow::Branch(remote, index) => {
-                    self.render_remote_branch_row(snapshot, remote, index, cx)
-                }
+            .map(|row| match row {
+                RemoteRow::Remote(remote) => self.render_remote_row(snapshot, *remote, cx),
+                RemoteRow::Folder {
+                    remote,
+                    path,
+                    label,
+                    branch_count,
+                    depth,
+                    expanded,
+                } => self.render_remote_branch_folder_row(
+                    snapshot,
+                    *remote,
+                    path,
+                    label,
+                    *branch_count,
+                    *depth,
+                    *expanded,
+                    cx,
+                ),
+                RemoteRow::Branch {
+                    remote,
+                    index,
+                    label,
+                    depth,
+                } => self.render_remote_branch_row(snapshot, *remote, *index, label, *depth, cx),
             })
             .collect()
     }
@@ -854,7 +1048,7 @@ impl Sidebar {
                 } else {
                     section::content(false).child(Self::section_rows(
                         "remote-rows",
-                        snapshot.data.remote_heights.clone(),
+                        snapshot.remote_heights.clone(),
                         snapshot,
                         Self::remote_rows,
                         cx,

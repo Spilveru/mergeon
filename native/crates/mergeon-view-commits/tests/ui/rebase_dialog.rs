@@ -95,7 +95,8 @@ async fn renders_rows_oldest_first_and_omits_squash_and_fixup_on_the_first_row(
         RebaseAction::Drop
     );
 
-    // La segunda fila ofrece las cinco acciones.
+    // Al descartar la primera fila, la segunda se queda sin predecesor vivo:
+    // solo ofrece pick, reword y drop.
     app.click(cx, action_trigger('b'));
     let entries = app.in_window(cx, |window, _| {
         let menu = gpui_kit::test::TestWindowExt::within(window, "popup-menu");
@@ -103,7 +104,40 @@ async fn renders_rows_oldest_first_and_omits_squash_and_fixup_on_the_first_row(
             .filter(|index| menu.try_find(*index).is_some())
             .count()
     });
+    assert_eq!(entries, 3);
+    app.in_window(cx, |window, cx| {
+        gpui_kit::test::TestWindowExt::press(window, "escape", cx);
+    });
+
+    // La tercera fila sí tiene a la segunda (`pick`) delante: ofrece las cinco.
+    app.click(cx, action_trigger('c'));
+    let entries = app.in_window(cx, |window, _| {
+        let menu = gpui_kit::test::TestWindowExt::within(window, "popup-menu");
+        (0usize..6)
+            .filter(|index| menu.try_find(*index).is_some())
+            .count()
+    });
     assert_eq!(entries, 5);
+}
+
+#[gpui_kit::test]
+async fn dropping_the_first_row_promotes_following_squash_to_pick(cx: &mut TestAppContext) {
+    let app = TestApp::new(cx);
+    let (dialog, _) = open_dialog(&app, cx);
+
+    app.in_window(cx, |window, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.set_action(1, RebaseAction::Squash, window, cx);
+            assert_eq!(dialog.rows()[1].action, RebaseAction::Squash);
+            dialog.set_action(0, RebaseAction::Drop, window, cx);
+        });
+    });
+
+    dialog.read_with(cx, |dialog, _| {
+        assert_eq!(dialog.rows()[0].action, RebaseAction::Drop);
+        assert_eq!(dialog.rows()[1].action, RebaseAction::Pick);
+        assert!(dialog.can_submit());
+    });
 }
 
 #[gpui_kit::test]

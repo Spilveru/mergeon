@@ -9,11 +9,11 @@ use gpui_kit::{
     ParentElement as _, Render, Role, SharedString, Stateful, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window, div, px, rems,
 };
-use mergeon_app::AppModel;
 use mergeon_app::backend::editor::editor_definition;
 use mergeon_app::backend::{
     DetectedEditor, ExternalEditorSettings, IdentityValues, SetIdentityOptions,
 };
+use mergeon_app::{ActionDialogMode, AppModel, RemoteAction};
 use mergeon_ui::dialog::{self, AppDialog, DialogId, DialogWidth};
 use mergeon_ui::{
     ActivePaletteExt as _, InputEvent, InputState, MergeonStyled as _, RadioOption, SelectOption,
@@ -48,6 +48,14 @@ impl PreferencesSection {
 
 /// `INTERVAL_OPTIONS`
 const INTERVALS: [u32; 4] = [5, 10, 15, 30];
+
+fn action_dialog_options() -> [SelectOption; 3] {
+    [
+        SelectOption::new(ActionDialogMode::Toolbar.as_str(), "From toolbar"),
+        SelectOption::new(ActionDialogMode::Always.as_str(), "Always"),
+        SelectOption::new(ActionDialogMode::Never.as_str(), "Never"),
+    ]
+}
 
 /// Las opciones del selector de editor externo: "Automatic", los editores
 /// detectados (y el elegido aunque ya no se encuentre), el programa por
@@ -599,6 +607,31 @@ impl PreferencesPanel {
                 )
             })
     }
+    fn render_action_dialog_row(
+        id: &'static str,
+        label: &'static str,
+        action: RemoteAction,
+        mode: ActionDialogMode,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        Self::field(
+            label,
+            mergeon_ui::select(id)
+                .items(action_dialog_options())
+                .value(mode.as_str())
+                .on_change(cx.listener(move |this, value: &SharedString, _, cx| {
+                    let Some(mode) = ActionDialogMode::parse(value.as_ref()) else {
+                        return;
+                    };
+                    this.model
+                        .update(cx, |model, cx| {
+                            model.set_action_dialog_mode(action, mode, cx)
+                        })
+                        .detach();
+                })),
+            cx,
+        )
+    }
 }
 
 impl Render for PreferencesPanel {
@@ -607,7 +640,9 @@ impl Render for PreferencesPanel {
         let has_repository = model.active_repository().is_some();
         let auto_fetch_enabled = model.auto_fetch_enabled();
         let auto_fetch_interval = model.auto_fetch_interval_minutes();
-        let skip_action_dialogs = model.skip_action_dialogs();
+        let fetch_dialog_mode = model.action_dialog_mode(RemoteAction::Fetch);
+        let pull_dialog_mode = model.action_dialog_mode(RemoteAction::Pull);
+        let push_dialog_mode = model.action_dialog_mode(RemoteAction::Push);
         let desktop_notifications = model.desktop_notifications_enabled();
         let theme = if model.is_dark() { "dark" } else { "light" };
 
@@ -757,24 +792,36 @@ impl Render for PreferencesPanel {
                 .child(
                     Self::section_block("prefs-actions-section", "Git actions", cx)
                         .child(
-                            div().flex().child(
-                                mergeon_ui::checkbox("prefs-skip-action-dialogs")
-                                    .label(
-                                        "Toolbar buttons run Fetch, Pull, and Push immediately (skip options dialog)",
-                                    )
-                                    .checked(skip_action_dialogs)
-                                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                        let checked = *checked;
-                                        this.model
-                                            .update(cx, |model, cx| {
-                                                model.set_skip_action_dialogs(checked, cx)
-                                            })
-                                            .detach();
-                                    })),
-                            ),
+                            div()
+                                .text_size(rems(0.75))
+                                .line_height(gpui_kit::relative(1.5))
+                                .tw_font_medium()
+                                .text_color(cx.palette().muted_foreground)
+                                .child("Show options dialog"),
                         )
+                        .child(Self::render_action_dialog_row(
+                            "prefs-action-dialog-fetch",
+                            "Fetch",
+                            RemoteAction::Fetch,
+                            fetch_dialog_mode,
+                            cx,
+                        ))
+                        .child(Self::render_action_dialog_row(
+                            "prefs-action-dialog-pull",
+                            "Pull",
+                            RemoteAction::Pull,
+                            pull_dialog_mode,
+                            cx,
+                        ))
+                        .child(Self::render_action_dialog_row(
+                            "prefs-action-dialog-push",
+                            "Push",
+                            RemoteAction::Push,
+                            push_dialog_mode,
+                            cx,
+                        ))
                         .child(Self::hint(
-                            "Keyboard shortcuts always run Fetch, Pull, and Push directly using your last confirmed options (falling back to the dialog when no safe target exists). Shift+click, right-click, or the Command Palette still opens options.",
+                            "From toolbar: buttons open options; keyboard shortcuts run directly with your last confirmed options. Always: buttons and shortcuts ask first. Never: both run directly. Shift+click, right-click, or the Command Palette always opens options.",
                             cx,
                         )),
                 )

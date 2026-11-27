@@ -130,6 +130,8 @@ pub const CHANGES_HINTS_DISMISSED_KEY: &str = "changesHintsDismissed";
 
 /// Clave de [`Settings::skip_action_dialogs`] dentro de `settings`.
 pub const SKIP_ACTION_DIALOGS_KEY: &str = "skipActionDialogs";
+/// Clave de [`Settings::action_dialogs`] dentro de `settings`.
+pub const ACTION_DIALOGS_KEY: &str = "actionDialogs";
 /// Clave de [`Settings::action_defaults`] dentro de `settings`.
 pub const ACTION_DEFAULTS_KEY: &str = "actionDefaults";
 /// Clave de [`Settings::keyboard_shortcuts`] dentro de `settings`.
@@ -181,11 +183,30 @@ pub(crate) fn normalize_settings(settings: Option<&Value>) -> Value {
             serde_json::to_value(ExternalEditorSettings::from_value(editor)).unwrap_or(Value::Null),
         );
     }
-    if let Some(skip) = prop(settings, SKIP_ACTION_DIALOGS_KEY) {
-        if js_truthy(skip) {
+    let has_skip = prop(settings, SKIP_ACTION_DIALOGS_KEY).is_some();
+    let has_dialogs = prop(settings, ACTION_DIALOGS_KEY).is_some();
+    if has_skip || has_dialogs {
+        let raw_skip = prop(settings, SKIP_ACTION_DIALOGS_KEY).is_some_and(js_truthy);
+        let raw_dialogs = prop(settings, ACTION_DIALOGS_KEY)
+            .map(ActionDialogs::from_value)
+            .unwrap_or_default();
+        let (skip, dialogs) = ActionDialogs::from_modes(
+            raw_dialogs.resolve(RemoteAction::Fetch, raw_skip),
+            raw_dialogs.resolve(RemoteAction::Pull, raw_skip),
+            raw_dialogs.resolve(RemoteAction::Push, raw_skip),
+        );
+        if skip {
             normalized.insert(SKIP_ACTION_DIALOGS_KEY.into(), Value::Bool(true));
         } else {
             normalized.remove(SKIP_ACTION_DIALOGS_KEY);
+        }
+        if dialogs.is_empty() {
+            normalized.remove(ACTION_DIALOGS_KEY);
+        } else {
+            normalized.insert(
+                ACTION_DIALOGS_KEY.into(),
+                serde_json::to_value(dialogs).unwrap_or(Value::Null),
+            );
         }
     }
     if let Some(action_defaults) = prop(settings, ACTION_DEFAULTS_KEY) {
@@ -530,6 +551,114 @@ impl ExternalEditorSettings {
     }
 }
 
+/// Cuándo abrir el diálogo de opciones de una acción remota (Fetch / Pull / Push).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionDialogMode {
+    /// Desde barra de herramientas y paleta abre diálogo; el atajo corre directo.
+    #[default]
+    Toolbar,
+    /// Abre diálogo siempre (incluyendo atajos de teclado).
+    Always,
+    /// Corre directo cuando hay valores seguros (barra, paleta y atajos).
+    Never,
+}
+
+impl ActionDialogMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Toolbar => "toolbar",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "toolbar" => Some(Self::Toolbar),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+}
+
+/// Acción remota con diálogo de opciones configurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteAction {
+    Fetch,
+    Pull,
+    Push,
+}
+
+/// Overrides por acción para el modo de diálogo (`settings.actionDialogs`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDialogs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch: Option<ActionDialogMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<ActionDialogMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<ActionDialogMode>,
+}
+
+impl ActionDialogs {
+    pub fn is_empty(&self) -> bool {
+        self.fetch.is_none() && self.pull.is_none() && self.push.is_none()
+    }
+
+    pub fn resolve(&self, action: RemoteAction, skip_action_dialogs: bool) -> ActionDialogMode {
+        let override_mode = match action {
+            RemoteAction::Fetch => self.fetch,
+            RemoteAction::Pull => self.pull,
+            RemoteAction::Push => self.push,
+        };
+        override_mode.unwrap_or(if skip_action_dialogs {
+            ActionDialogMode::Never
+        } else {
+            ActionDialogMode::Toolbar
+        })
+    }
+
+    pub fn from_modes(
+        fetch: ActionDialogMode,
+        pull: ActionDialogMode,
+        push: ActionDialogMode,
+    ) -> (bool, Self) {
+        let never_count = [fetch, pull, push]
+            .into_iter()
+            .filter(|m| *m == ActionDialogMode::Never)
+            .count();
+        let base = if never_count >= 2 {
+            ActionDialogMode::Never
+        } else {
+            ActionDialogMode::Toolbar
+        };
+        let skip_action_dialogs = base == ActionDialogMode::Never;
+        let dialogs = Self {
+            fetch: (fetch != base).then_some(fetch),
+            pull: (pull != base).then_some(pull),
+            push: (push != base).then_some(push),
+        };
+        (skip_action_dialogs, dialogs)
+    }
+
+    /// Lectura tolerante: ignora valores desconocidos o que no sean cadenas.
+    pub fn from_value(value: &Value) -> Self {
+        let read = |key: &str| {
+            prop(Some(value), key)
+                .and_then(Value::as_str)
+                .and_then(ActionDialogMode::parse)
+        };
+        Self {
+            fetch: read("fetch"),
+            pull: read("pull"),
+            push: read("push"),
+        }
+    }
+}
+
 /// Opciones recordadas del diálogo de Fetch (`settings.actionDefaults.fetch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -628,6 +757,9 @@ pub struct Settings {
     /// valores seguros por defecto.
     #[serde(skip_serializing_if = "is_false")]
     pub skip_action_dialogs: bool,
+    /// Overrides por acción para el modo de diálogo de Fetch / Pull / Push.
+    #[serde(default, skip_serializing_if = "ActionDialogs::is_empty")]
+    pub action_dialogs: ActionDialogs,
     /// Últimas opciones seguras confirmadas en los diálogos de Fetch / Pull / Push.
     #[serde(skip_serializing_if = "ActionDefaults::is_default")]
     pub action_defaults: ActionDefaults,
@@ -651,6 +783,7 @@ impl Default for Settings {
             commit_view: CommitViewSettings::default(),
             external_editor: ExternalEditorSettings::default(),
             skip_action_dialogs: false,
+            action_dialogs: ActionDialogs::default(),
             action_defaults: ActionDefaults::default(),
             keyboard_shortcuts: BTreeMap::new(),
             extra: Map::new(),
@@ -659,7 +792,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const KNOWN: [&'static str; 11] = [
+    const KNOWN: [&'static str; 12] = [
         "theme",
         "autoFetch",
         "autoFetchIntervalMinutes",
@@ -669,6 +802,7 @@ impl Settings {
         "commitView",
         EXTERNAL_EDITOR_KEY,
         SKIP_ACTION_DIALOGS_KEY,
+        ACTION_DIALOGS_KEY,
         ACTION_DEFAULTS_KEY,
         KEYBOARD_SHORTCUTS_KEY,
     ];
@@ -679,6 +813,15 @@ impl Settings {
     /// `false` (`useAppSettings.js`).
     pub fn from_value(value: &Value) -> Self {
         let value = Some(value);
+        let raw_skip = bool_or(prop(value, SKIP_ACTION_DIALOGS_KEY), false);
+        let raw_dialogs = prop(value, ACTION_DIALOGS_KEY)
+            .map(ActionDialogs::from_value)
+            .unwrap_or_default();
+        let (skip_action_dialogs, action_dialogs) = ActionDialogs::from_modes(
+            raw_dialogs.resolve(RemoteAction::Fetch, raw_skip),
+            raw_dialogs.resolve(RemoteAction::Pull, raw_skip),
+            raw_dialogs.resolve(RemoteAction::Push, raw_skip),
+        );
         Self {
             theme: match prop(value, "theme") {
                 // Sin ajuste guardado (instalación nueva): el tema claro de Señal.
@@ -702,7 +845,8 @@ impl Settings {
             external_editor: prop(value, EXTERNAL_EDITOR_KEY)
                 .map(ExternalEditorSettings::from_value)
                 .unwrap_or_default(),
-            skip_action_dialogs: bool_or(prop(value, SKIP_ACTION_DIALOGS_KEY), false),
+            skip_action_dialogs,
+            action_dialogs,
             action_defaults: prop(value, ACTION_DEFAULTS_KEY)
                 .map(ActionDefaults::from_value)
                 .unwrap_or_default(),
@@ -770,6 +914,8 @@ pub struct SettingsUpdate {
     pub external_editor: Option<ExternalEditorSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_action_dialogs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_dialogs: Option<ActionDialogs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_defaults: Option<ActionDefaults>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1297,5 +1443,156 @@ mod tests {
             ActionDefaults::from_value(&json!({})),
             ActionDefaults::default()
         );
+    }
+
+    #[test]
+    fn action_dialogs_canonicalize_migrate_and_parse_leniently() {
+        // Default Settings omits both skipActionDialogs and actionDialogs.
+        let default_json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(default_json.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert!(default_json.get(ACTION_DIALOGS_KEY).is_none());
+        assert_eq!(default_json, default_settings());
+        assert!(normalize_settings(None).get(ACTION_DIALOGS_KEY).is_none());
+        assert_eq!(
+            ActionDialogs::default().resolve(RemoteAction::Fetch, false),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            ActionDialogs::default().resolve(RemoteAction::Pull, false),
+            ActionDialogMode::Toolbar
+        );
+        assert_eq!(
+            ActionDialogs::default().resolve(RemoteAction::Push, false),
+            ActionDialogMode::Toolbar
+        );
+
+        // Legacy skipActionDialogs: true -> all Never, actionDialogs omitted.
+        let legacy = normalize_settings(Some(&json!({ "skipActionDialogs": true })));
+        assert_eq!(legacy[SKIP_ACTION_DIALOGS_KEY], json!(true));
+        assert!(legacy.get(ACTION_DIALOGS_KEY).is_none());
+        let parsed_legacy = Settings::from_value(&legacy);
+        assert!(parsed_legacy.skip_action_dialogs);
+        assert!(parsed_legacy.action_dialogs.is_empty());
+        for action in [RemoteAction::Fetch, RemoteAction::Pull, RemoteAction::Push] {
+            assert_eq!(
+                parsed_legacy
+                    .action_dialogs
+                    .resolve(action, parsed_legacy.skip_action_dialogs),
+                ActionDialogMode::Never
+            );
+        }
+
+        // All 3 set to Never via actionDialogs canonicalizes to skipActionDialogs: true only.
+        let all_never = normalize_settings(Some(&json!({
+            "actionDialogs": { "fetch": "never", "pull": "never", "push": "never" }
+        })));
+        assert_eq!(all_never[SKIP_ACTION_DIALOGS_KEY], json!(true));
+        assert!(all_never.get(ACTION_DIALOGS_KEY).is_none());
+
+        // push: Always only -> {"actionDialogs":{"push":"always"}}, skipActionDialogs omitted.
+        let (skip, dialogs) = ActionDialogs::from_modes(
+            ActionDialogMode::Toolbar,
+            ActionDialogMode::Toolbar,
+            ActionDialogMode::Always,
+        );
+        assert!(!skip);
+        assert_eq!(
+            dialogs,
+            ActionDialogs {
+                fetch: None,
+                pull: None,
+                push: Some(ActionDialogMode::Always),
+            }
+        );
+        let push_always = normalize_settings(Some(&json!({
+            "actionDialogs": { "push": "always" }
+        })));
+        assert!(push_always.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert_eq!(push_always[ACTION_DIALOGS_KEY], json!({ "push": "always" }));
+        let parsed_push_always = Settings::from_value(&push_always);
+        assert!(!parsed_push_always.skip_action_dialogs);
+        assert_eq!(parsed_push_always.action_dialogs, dialogs);
+        assert!(!parsed_push_always.extra.contains_key(ACTION_DIALOGS_KEY));
+
+        // 2x Never + 1x Always -> {"skipActionDialogs":true,"actionDialogs":{"push":"always"}}.
+        let (skip, dialogs) = ActionDialogs::from_modes(
+            ActionDialogMode::Never,
+            ActionDialogMode::Never,
+            ActionDialogMode::Always,
+        );
+        assert!(skip);
+        assert_eq!(
+            dialogs,
+            ActionDialogs {
+                fetch: None,
+                pull: None,
+                push: Some(ActionDialogMode::Always),
+            }
+        );
+        let two_never = normalize_settings(Some(&json!({
+            "actionDialogs": { "fetch": "never", "pull": "never", "push": "always" }
+        })));
+        assert_eq!(two_never[SKIP_ACTION_DIALOGS_KEY], json!(true));
+        assert_eq!(two_never[ACTION_DIALOGS_KEY], json!({ "push": "always" }));
+        let parsed_two_never = Settings::from_value(&two_never);
+        assert!(parsed_two_never.skip_action_dialogs);
+        assert_eq!(
+            parsed_two_never
+                .action_dialogs
+                .resolve(RemoteAction::Fetch, parsed_two_never.skip_action_dialogs),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            parsed_two_never
+                .action_dialogs
+                .resolve(RemoteAction::Pull, parsed_two_never.skip_action_dialogs),
+            ActionDialogMode::Never
+        );
+        assert_eq!(
+            parsed_two_never
+                .action_dialogs
+                .resolve(RemoteAction::Push, parsed_two_never.skip_action_dialogs),
+            ActionDialogMode::Always
+        );
+
+        // Resetting back to all Toolbar via SettingsUpdate removes both keys.
+        let reset = SettingsUpdate {
+            skip_action_dialogs: Some(false),
+            action_dialogs: Some(ActionDialogs::default()),
+            ..Default::default()
+        };
+        let cleared = merge_settings_update(&two_never, &serde_json::to_value(&reset).unwrap());
+        assert!(cleared.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert!(cleared.get(ACTION_DIALOGS_KEY).is_none());
+
+        // Lenient parsing of unknown/invalid values.
+        assert_eq!(
+            ActionDialogMode::parse("toolbar"),
+            Some(ActionDialogMode::Toolbar)
+        );
+        assert_eq!(
+            ActionDialogMode::parse("always"),
+            Some(ActionDialogMode::Always)
+        );
+        assert_eq!(
+            ActionDialogMode::parse("never"),
+            Some(ActionDialogMode::Never)
+        );
+        assert_eq!(ActionDialogMode::parse("sometimes"), None);
+        assert_eq!(ActionDialogMode::Toolbar.as_str(), "toolbar");
+        assert_eq!(ActionDialogMode::Always.as_str(), "always");
+        assert_eq!(ActionDialogMode::Never.as_str(), "never");
+
+        let lenient = normalize_settings(Some(&json!({
+            "actionDialogs": { "fetch": "bogus", "pull": 42, "push": "always" }
+        })));
+        assert!(lenient.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert_eq!(lenient[ACTION_DIALOGS_KEY], json!({ "push": "always" }));
+
+        let all_bogus = normalize_settings(Some(&json!({
+            "actionDialogs": { "fetch": "unknown", "pull": null }
+        })));
+        assert!(all_bogus.get(SKIP_ACTION_DIALOGS_KEY).is_none());
+        assert!(all_bogus.get(ACTION_DIALOGS_KEY).is_none());
     }
 }

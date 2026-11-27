@@ -385,7 +385,10 @@ impl NewWorktreeDialog {
         self.touched = true;
         match self.validation(cx) {
             Ok(options) => {
-                self.close_dialog(window, cx);
+                let Some(id) = self.dialog_id.take() else {
+                    return;
+                };
+                dialog::close_id(window, cx, id);
                 cx.emit(NewWorktreeDialogEvent::Submit {
                     options,
                     open_after: self.open_after,
@@ -605,6 +608,13 @@ pub fn open_new_worktree_dialog(
                     )
             }
         })
+        .on_confirm({
+            let view = view.clone();
+            move |window, cx| {
+                view.update(cx, |view, cx| view.submit(window, cx));
+                false
+            }
+        })
         .on_close({
             let view = view.clone();
             move |_, cx| view.update(cx, |view, cx| view.dismissed(cx))
@@ -613,7 +623,14 @@ pub fn open_new_worktree_dialog(
 
     view.update(cx, |view, cx| {
         view.dialog_id = Some(id);
-        view.branch.update(cx, |state, cx| state.focus(window, cx));
+        match view.mode {
+            NewWorktreeMode::NewBranch => {
+                view.branch.update(cx, |state, cx| state.focus(window, cx));
+            }
+            NewWorktreeMode::ExistingBranch => {
+                view.folder.update(cx, |state, cx| state.focus(window, cx));
+            }
+        }
     });
     view
 }

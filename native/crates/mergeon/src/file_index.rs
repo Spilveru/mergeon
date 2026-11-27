@@ -70,6 +70,7 @@ pub fn list_files(repo_path: &str) -> Result<FileList, String> {
 struct Entry {
     list: Option<FileList>,
     stale: bool,
+    generation: u64,
     loading: Option<Task<()>>,
     /// Orden de uso, para soltar la lista más vieja.
     used: u64,
@@ -102,6 +103,24 @@ impl FileIndex {
     pub fn invalidate(&mut self, repo_path: &str) {
         if let Some(entry) = self.entries.get_mut(repo_path) {
             entry.stale = true;
+            entry.generation = entry.generation.wrapping_add(1);
+        }
+    }
+
+    fn apply_loaded(&mut self, path: &str, generation: u64, result: Result<FileList, String>) {
+        let Some(entry) = self.entries.get_mut(path) else {
+            return;
+        };
+        entry.loading = None;
+        if entry.generation != generation {
+            return;
+        }
+        match result {
+            Ok(list) => {
+                entry.list = Some(list);
+                entry.stale = false;
+            }
+            Err(error) => log::warn!("git ls-files en {path}: {error}"),
         }
     }
 
@@ -114,6 +133,7 @@ impl FileIndex {
         if entry.loading.is_some() || (entry.list.is_some() && !entry.stale) {
             return;
         }
+        let generation = entry.generation;
         let path = repo_path.to_string();
         let reading = cx.background_spawn({
             let path = path.clone();
@@ -122,17 +142,7 @@ impl FileIndex {
         entry.loading = Some(cx.spawn(async move |this, cx| {
             let result = reading.await;
             this.update(cx, |this, cx| {
-                let Some(entry) = this.entries.get_mut(&path) else {
-                    return;
-                };
-                entry.loading = None;
-                match result {
-                    Ok(list) => {
-                        entry.list = Some(list);
-                        entry.stale = false;
-                    }
-                    Err(error) => log::warn!("git ls-files en {path}: {error}"),
-                }
+                this.apply_loaded(&path, generation, result);
                 cx.notify();
             })
             .ok();
@@ -200,5 +210,53 @@ mod tests {
     fn a_path_that_is_not_a_repository_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert!(list_files(&dir.path().to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn invalidate_during_in_flight_load_discards_stale_result_and_keeps_entry_stale() {
+        let mut index = FileIndex::new();
+        let path = "/repo";
+        let initial = FileList {
+            files: Arc::new(vec!["a.rs".to_string()]),
+            head: Some("1".repeat(40)),
+            truncated: false,
+        };
+        index.entries.insert(
+            path.to_string(),
+            Entry {
+                list: Some(initial.clone()),
+                stale: false,
+                generation: 0,
+                loading: None,
+                used: 1,
+            },
+        );
+
+        // Start a refresh at generation 0, then invalidate before it finishes.
+        let started_gen = index.entries[path].generation;
+        index.invalidate(path);
+        assert!(index.entries[path].stale);
+        assert_eq!(index.entries[path].generation, 1);
+
+        let stale_result = FileList {
+            files: Arc::new(vec!["old.rs".to_string()]),
+            head: Some("2".repeat(40)),
+            truncated: false,
+        };
+        index.apply_loaded(path, started_gen, Ok(stale_result));
+        // Stale completion must NOT overwrite cached list or clear `stale`.
+        assert_eq!(index.get(path), Some(&initial));
+        assert!(index.entries[path].stale);
+
+        // Completion matching current generation updates list and clears `stale`.
+        let fresh_result = FileList {
+            files: Arc::new(vec!["a.rs".to_string(), "b.rs".to_string()]),
+            head: Some("3".repeat(40)),
+            truncated: false,
+        };
+        let current_gen = index.entries[path].generation;
+        index.apply_loaded(path, current_gen, Ok(fresh_result.clone()));
+        assert_eq!(index.get(path), Some(&fresh_result));
+        assert!(!index.entries[path].stale);
     }
 }

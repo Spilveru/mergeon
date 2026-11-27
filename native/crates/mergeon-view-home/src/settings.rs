@@ -9,7 +9,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px, relative,
 };
-use mergeon_app::AppModel;
+use mergeon_app::{AppEvent, AppModel};
 use mergeon_ui::{ActivePaletteExt as _, Lucide, Radius};
 
 use crate::github_accounts::{GitHubAccountsEvent, GitHubAccountsManager};
@@ -142,6 +142,12 @@ impl SettingsView {
                     this.initial_section = initial_section;
                 }
                 cx.notify();
+            }),
+            cx.subscribe_in(&model, window, |this, _, event: &AppEvent, window, cx| {
+                if let AppEvent::OpenSettings { section } = event {
+                    this.set_section(SettingsSection::parse(section), window, cx);
+                    this.initial_section = section.clone();
+                }
             }),
             cx.subscribe(&accounts, |this, _, event: &GitHubAccountsEvent, cx| {
                 if *event == GitHubAccountsEvent::AddAccount {

@@ -285,6 +285,9 @@ pub struct CommitsView {
     /// para mostrar el spinner; un refresco mantiene las filas en pantalla.
     loading_initial_history: bool,
     selected_commit: Option<CommitRow>,
+    /// Un salto explícito (sidebar o búsqueda) debe volver a centrar la fila
+    /// seleccionada aunque ya fuese la activa.
+    scroll_selected_on_sync: bool,
     /// Una mutación del historial llegó sin estar viendo los commits: se
     /// recarga al volver.
     pending_history_reload: bool,
@@ -462,6 +465,7 @@ impl CommitsView {
             loading_more_commits: false,
             loading_initial_history: false,
             selected_commit: None,
+            scroll_selected_on_sync: false,
             pending_history_reload: false,
             current_branch: String::new(),
             loading_details: false,
@@ -767,6 +771,7 @@ impl CommitsView {
         );
         let working_changes = self.working_changes(cx);
         let multi = self.multi.set().clone();
+        let scroll_selected = std::mem::take(&mut self.scroll_selected_on_sync);
         self.history.update(cx, |list, cx| {
             list.set_multi_selection(multi, cx);
             list.set_working_changes(working_changes, cx);
@@ -776,6 +781,10 @@ impl CommitsView {
             list.set_loading_more(loading_more, cx);
             list.set_loading(loading, cx);
             list.set_selected_commit_hash(selected, cx);
+            if scroll_selected {
+                list.scroll_selected_into_view();
+                cx.notify();
+            }
         });
 
         let preferences = *self.model.read(cx).diff_preferences();

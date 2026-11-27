@@ -170,7 +170,8 @@ impl RenderOnce for Tabs {
                 .whitespace_nowrap()
                 .text_color(palette.text_2)
                 .when(!item.disabled, |this| {
-                    this.cursor_pointer()
+                    this.key_context(crate::button::BUTTON_KEY_CONTEXT)
+                        .cursor_pointer()
                         .hover(|style| style.text_color(palette.text_1).bg(palette.bg_hover))
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 })

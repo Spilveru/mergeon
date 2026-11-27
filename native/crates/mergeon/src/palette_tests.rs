@@ -19,7 +19,7 @@ use gpui_kit::{
 use gpui_kit::{ParentElement as _, Styled as _};
 use mergeon_app::shell::DialogRequest;
 use mergeon_app::testing::{RecordingLauncher, RecordingUiHost, TestBackend};
-use mergeon_app::{AddRepository, AppEvent, AppModel};
+use mergeon_app::{ActionDialogMode, AddRepository, AppEvent, AppModel, RemoteAction};
 use mergeon_model::command_palette::PaletteKind;
 use mergeon_model::keyboard_shortcuts::ShortcutAction;
 use mergeon_model::workspace_tabs::{FileTabDescriptor, WorkspaceSection};
@@ -1460,4 +1460,345 @@ async fn keyboard_fetch_runs_directly_while_palette_fetch_opens_dialog_when_skip
             .borrow()
             .contains(&AppEvent::ShowDialog(DialogRequest::Fetch))
     });
+}
+
+#[gpui_kit::test]
+async fn per_action_dialog_modes_update_palette_and_keyboard_shortcuts(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx, true);
+    let remote = tempfile::Builder::new()
+        .prefix("palette-per-action-remote")
+        .tempdir()
+        .unwrap();
+    git(remote.path(), &["init", "--bare", "-q"]);
+    let dir = repository("palette-per-action");
+    let remote_url = remote.path().to_string_lossy().into_owned();
+    git(dir.path(), &["remote", "add", "origin", &remote_url]);
+    git(dir.path(), &["push", "-q", "-u", "origin", "main"]);
+    harness.open(&dir, cx).await;
+
+    let model = harness.model.clone();
+    wait_until(cx, "remoto cargado", |cx| {
+        model.read_with(cx, |model, _| {
+            !model.repositories().active_repository_remotes().is_empty()
+        })
+    });
+
+    // Fetch = Never, Pull = Toolbar, Push = Always.
+    model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Fetch, ActionDialogMode::Never, cx)
+        })
+        .await;
+    model
+        .update(cx, |model, cx| {
+            model.set_action_dialog_mode(RemoteAction::Push, ActionDialogMode::Always, cx)
+        })
+        .await;
+    cx.run_until_parked();
+
+    harness.open_palette(cx);
+    let labels = harness.labels(cx);
+    assert!(labels.iter().any(|label| label == "Fetch"), "{labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "Fetch (options)…"),
+        "{labels:?}"
+    );
+    assert!(labels.iter().any(|label| label == "Pull…"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label == "Pull (options)…"),
+        "{labels:?}"
+    );
+    assert!(labels.iter().any(|label| label == "Push…"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label == "Push (options)…"),
+        "{labels:?}"
+    );
+    harness.in_window(cx, |window, cx| window.press("escape", cx));
+
+    // Keyboard Push opens DialogRequest::Push because Push is set to Always.
+    harness.events.borrow_mut().clear();
+    harness.in_window(cx, |window, cx| window.press("secondary-shift-u", cx));
+    wait_until(cx, "diálogo Push desde teclado", |_| {
+        harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Push))
+    });
+
+    // Close dialog; keyboard Fetch (Never) and Pull (Toolbar) still run directly.
+    harness.in_window(cx, |window, cx| {
+        mergeon_ui::dialog::close_all(window, cx);
+        window.blur(cx);
+    });
+    harness.events.borrow_mut().clear();
+    harness.in_window(cx, |window, cx| window.press("secondary-shift-f", cx));
+    wait_until(cx, "direct keyboard fetch", |cx| {
+        model.read_with(cx, |model, _| {
+            model
+                .operations_log()
+                .entries
+                .iter()
+                .any(|entry| entry.operation.as_deref() == Some("fetch"))
+        })
+    });
+    assert!(
+        !harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Fetch))
+    );
+
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-p", cx));
+    wait_until(cx, "direct keyboard pull", |cx| {
+        model.read_with(cx, |model, _| {
+            model
+                .operations_log()
+                .entries
+                .iter()
+                .any(|entry| entry.operation.as_deref() == Some("pull"))
+        })
+    });
+    assert!(
+        !harness
+            .events
+            .borrow()
+            .contains(&AppEvent::ShowDialog(DialogRequest::Pull))
+    );
+}
+
+#[gpui_kit::test]
+async fn switching_workspace_sections_clears_orphaned_focus_without_blurring_sidebar_search(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::Focusable as _;
+
+    let harness = Harness::new(cx, true);
+    let dir = repository("workspace-focus");
+    let repo_id = harness.open(&dir, cx).await;
+    let shell = harness.shell.clone().unwrap();
+
+    // Render initial All Commits view so CommitsView claims focus.
+    harness.in_window(cx, |_, _| ());
+    let workspace = cx.update(|cx| shell.read(cx).workspace(&repo_id).unwrap().clone());
+    let commits_focused = |cx: &mut TestAppContext| {
+        harness.in_window(cx, |window, cx| {
+            workspace
+                .read(cx)
+                .commits()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    let changes_focused = |cx: &mut TestAppContext| {
+        harness.in_window(cx, |window, cx| {
+            workspace
+                .read(cx)
+                .changes()
+                .read(cx)
+                .list_focus_handle()
+                .is_focused(window)
+        })
+    };
+
+    assert!(commits_focused(cx), "CommitsView starts focused");
+
+    // Switching to Local Changes blurs orphaned CommitsView focus so ChangesView takes focus.
+    harness.in_window(cx, |window, cx| window.click("workspace-view-changes", cx));
+    assert!(!commits_focused(cx), "CommitsView lost focus on switch");
+    assert!(changes_focused(cx), "ChangesView gained focus on switch");
+
+    // Switching back to All Commits blurs orphaned ChangesView focus so CommitsView takes focus.
+    harness.in_window(cx, |window, cx| window.click("workspace-view-commits", cx));
+    assert!(!changes_focused(cx), "ChangesView lost focus on switch");
+    assert!(commits_focused(cx), "CommitsView regained focus on switch");
+
+    // Ctrl+F from Local Changes switches to Commits AND keeps focus in the sidebar search input.
+    harness.in_window(cx, |window, cx| window.click("workspace-view-changes", cx));
+    assert!(changes_focused(cx));
+    harness.in_window(cx, |window, cx| window.press("secondary-f", cx));
+    assert!(
+        !commits_focused(cx),
+        "CommitsView must not steal focus from sidebar search"
+    );
+    assert!(
+        harness.in_window(cx, |window, cx| window.focused(cx).is_some()),
+        "sidebar search input remains focused"
+    );
+}
+
+#[gpui_kit::test]
+async fn workspace_switcher_shortcut_supports_two_keystroke_number_hotkeys_arrows_and_escape(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx, true);
+    let first = repository("ws-switcher-a");
+    let second = repository("ws-switcher-b");
+    let first_id = harness.open(&first, cx).await;
+    let second_id = harness.open(&second, cx).await;
+    let model = harness.model.clone();
+    let shell = harness.shell.clone().unwrap();
+
+    let ws1 = model.update(cx, |model, cx| {
+        model
+            .create_workspace("Work", vec![first_id.clone()], cx)
+            .expect("Work workspace")
+    });
+    let ws2 = model.update(cx, |model, cx| {
+        model
+            .create_workspace("Personal", vec![second_id.clone()], cx)
+            .expect("Personal workspace")
+    });
+    cx.run_until_parked();
+
+    assert!(model.read_with(cx, |model, _| model.active_workspace_id().is_none()));
+
+    // Default shortcut (`mod+alt+w`) opens the workspace switcher dialog with `All` pre-selected.
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    let switcher = cx
+        .update(|cx| shell.read(cx).workspace_switcher().cloned())
+        .expect("workspace switcher opened");
+    assert_eq!(cx.update(|cx| switcher.read(cx).selected_index()), 0);
+    let item1_id = gpui_kit::SharedString::from(format!("workspace-switcher-item:{}", ws1.id));
+    let item2_id = gpui_kit::SharedString::from(format!("workspace-switcher-item:{}", ws2.id));
+    harness.in_window(cx, |window, _| {
+        assert!(window.try_find("workspace-switcher-dialog").is_some());
+        assert!(window.try_find("workspace-switcher-all").is_some());
+        assert!(window.try_find(item1_id.clone()).is_some());
+        assert!(window.try_find(item2_id.clone()).is_some());
+        assert!(window.try_find("workspace-switcher-new").is_some());
+    });
+
+    // Pressing `1` immediately switches to workspace 1 and closes the dialog.
+    harness.in_window(cx, |window, cx| window.press("1", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+    harness.in_window(cx, |window, cx| {
+        assert_eq!(mergeon_ui::dialog::open_count(window, cx), 0);
+    });
+    wait_until(cx, "switched to Work via hotkey 1", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace_id() == Some(ws1.id.as_str())
+        })
+    });
+
+    // Reopening pre-selects the active workspace (`Work`, row 1); pressing `0` switches back to `All`.
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    let switcher = cx
+        .update(|cx| shell.read(cx).workspace_switcher().cloned())
+        .expect("workspace switcher reopened");
+    assert_eq!(cx.update(|cx| switcher.read(cx).selected_index()), 1);
+    harness.in_window(cx, |window, cx| window.press("0", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+    wait_until(cx, "switched back to All via hotkey 0", |cx| {
+        model.read_with(cx, |model, _| model.active_workspace_id().is_none())
+    });
+
+    // Arrow keys + Enter navigate and activate the highlighted workspace (`Personal`, row 2).
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    let switcher = cx
+        .update(|cx| shell.read(cx).workspace_switcher().cloned())
+        .expect("workspace switcher opened for arrow nav");
+    assert_eq!(cx.update(|cx| switcher.read(cx).selected_index()), 0);
+    harness.in_window(cx, |window, cx| {
+        window.press("down", cx);
+        window.press("down", cx);
+    });
+    assert_eq!(cx.update(|cx| switcher.read(cx).selected_index()), 2);
+    harness.in_window(cx, |window, cx| window.press("enter", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+    wait_until(cx, "switched to Personal via arrows + Enter", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace_id() == Some(ws2.id.as_str())
+        })
+    });
+
+    // Escape closes the switcher without changing the active workspace.
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_some()));
+    harness.in_window(cx, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+    harness.in_window(cx, |window, cx| {
+        assert_eq!(mergeon_ui::dialog::open_count(window, cx), 0);
+    });
+    assert_eq!(
+        model.read_with(cx, |model, _| model
+            .active_workspace_id()
+            .map(str::to_string)),
+        Some(ws2.id)
+    );
+}
+
+#[gpui_kit::test]
+async fn workspace_switcher_shortcut_rebinds_live_updates_tooltip_and_works_when_empty(
+    cx: &mut TestAppContext,
+) {
+    use mergeon_model::keyboard_shortcuts::{combo_label, is_mac_platform};
+
+    let harness = Harness::new(cx, true);
+    let first = repository("ws-switcher-rebind");
+    harness.open(&first, cx).await;
+    let model = harness.model.clone();
+    let shell = harness.shell.clone().unwrap();
+
+    // Opening with no workspaces shows `All` + `New workspace…`; selecting `New workspace…` creates one.
+    harness.host.answer_prompt("Work");
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_some()));
+    harness.in_window(cx, |window, _| {
+        assert!(window.try_find("workspace-switcher-all").is_some());
+        assert!(window.try_find("workspace-switcher-new").is_some());
+    });
+    harness.in_window(cx, |window, cx| {
+        window.press("down", cx);
+        window.press("enter", cx);
+    });
+    wait_until(cx, "Work workspace created from switcher", |cx| {
+        model.read_with(cx, |model, _| {
+            model.active_workspace().map(|ws| ws.name.as_str()) == Some("Work")
+        })
+    });
+    harness.in_window(cx, |_, _| ());
+
+    let default_hint = combo_label("mod+alt+w", is_mac_platform());
+    assert_eq!(
+        cx.update(|cx| shell.read(cx).workspace_switcher_tooltip()),
+        format!("Workspace: Work ({default_hint})")
+    );
+
+    // Rebinding SwitchWorkspace to `f6` takes effect live and updates the titlebar tooltip.
+    model
+        .update(cx, |model, cx| {
+            model.set_keyboard_shortcut(ShortcutAction::SwitchWorkspace, "f6", cx)
+        })
+        .await;
+    cx.run_until_parked();
+    harness.in_window(cx, |_, _| ());
+
+    assert_eq!(
+        cx.update(|cx| shell.read(cx).workspace_switcher_tooltip()),
+        "Workspace: Work (F6)"
+    );
+
+    // Old shortcut no longer opens the switcher.
+    harness.in_window(cx, |window, cx| window.press("secondary-alt-w", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+
+    // New shortcut (`f6`) opens it immediately.
+    harness.in_window(cx, |window, cx| window.press("f6", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_some()));
+    harness.in_window(cx, |window, cx| window.press("escape", cx));
+    assert!(cx.update(|cx| shell.read(cx).workspace_switcher().is_none()));
+
+    // Unbinding removes the shortcut hint from the tooltip.
+    model
+        .update(cx, |model, cx| {
+            model.set_keyboard_shortcut(ShortcutAction::SwitchWorkspace, "", cx)
+        })
+        .await;
+    cx.run_until_parked();
+    harness.in_window(cx, |_, _| ());
+    assert_eq!(
+        cx.update(|cx| shell.read(cx).workspace_switcher_tooltip()),
+        "Workspace: Work"
+    );
 }
